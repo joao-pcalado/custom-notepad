@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bloco de Notas</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styke.css">
+
+</head>
+<body>
+    
+<!-- TITLEBAR -->
+<div class="titlebar">
+  <span class="logo">✦ Bloco</span>
+  <div class="tb-sep"></div>
+
+  <button class="tbtn" onclick="newTab()">Novo</button>
+
+  <div class="dropdown-wrap">
+    <button class="tbtn" onclick="openFile()">Abrir</button>
+  </div>
+
+  <div class="dropdown-wrap">
+    <button class="tbtn" id="recentBtn" onclick="toggleRecent()">Recentes ▾</button>
+    <div id="recentDrop"></div>
+  </div>
+
+  <button class="tbtn" onclick="saveFile()">Salvar <small style="opacity:.6">Ctrl+S</small></button>
+  <button class="tbtn" onclick="saveAs()">Salvar como…</button>
+
+  <div class="tb-sep"></div>
+
+  <button class="tbtn active" id="previewBtn" onclick="togglePreview()">Minimap <small style="opacity:.6">Ctrl+Shift+P</small></button>
+  <button class="tbtn" id="focusBtn" onclick="toggleFocus()">Foco <small style="opacity:.6">F11</small></button>
+
+  <div class="tb-sep"></div>
+
+  <button class="tbtn" onclick="toggleFind()">Buscar <small style="opacity:.6">Ctrl+F</small></button>
+  <button class="tbtn" onclick="changeFontSize(1)">A+</button>
+  <button class="tbtn" onclick="changeFontSize(-1)">A-</button>
+
+  <div class="spacer"></div>
+  <span class="wc-display" id="wcTop">0 palavras</span>
+  <div class="tb-sep"></div>
+  <button class="tbtn accent" onclick="toggleSettings()">⚙</button>
+</div>
+
+<!-- TABS -->
+<div class="tabbar" id="tabbar">
+  <button class="new-tab-btn" onclick="newTab()" title="Nova aba (Ctrl+T)">＋</button>
+</div>
+
+<!-- FIND BAR -->
+<div id="findbar">
+  <input id="findInput" placeholder="Buscar…" oninput="doFind()" onkeydown="findKey(event)">
+  <input id="replaceInput" placeholder="Substituir por…" style="width:140px">
+  <button class="find-btn" onclick="doReplace()">Substituir</button>
+  <button class="find-btn" onclick="doReplaceAll()">Tudo</button>
+  <label><input type="checkbox" id="caseCk" onchange="doFind()"> Aa</label>
+  <label><input type="checkbox" id="wordCk" onchange="doFind()"> \b</label>
+  <span class="match-info" id="matchInfo"></span>
+  <button class="tbtn" onclick="prevMatch()">↑</button>
+  <button class="tbtn" onclick="nextMatch()">↓</button>
+  <button class="tbtn" onclick="toggleFind()">✕</button>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+  <div class="editor-pane" id="editorPane">
+    <div class="gutter" id="gutter"></div>
+    <div id="editor-wrap">
+      <div id="editor"
+        contenteditable="true"
+        spellcheck="true"
+        data-placeholder="Comece a escrever… (Ctrl+Shift+P para Minimap, F11 para foco)"
+      ></div>
+    </div>
+    <div id="minimap">
+      <canvas id="minimapCanvas"></canvas>
+      <div id="minimap-viewport"></div>
+    </div>
+  </div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="statusbar">
+  <span>Linha <b id="sLine">1</b>, Col <b id="sCol">1</b></span>
+  <span>Palavras: <b id="sWords">0</b></span>
+  <span>Chars: <b id="sChars">0</b></span>
+  <span id="sEncoding">UTF-8</span>
+  <span id="sFile" style="margin-left:auto">Sem título</span>
+</div>
+
+<!-- SETTINGS -->
+<div id="settings">
+  <button class="panel-close" onclick="toggleSettings()">✕</button>
+
+  <div>
+    <div class="panel-title">Tema</div>
+    <div class="theme-grid" id="themeGrid"></div>
+  </div>
+
+  <div>
+    <div class="panel-title">Cores</div>
+    <div class="sg">
+      <div class="slabel">Fundo</div>
+      <div class="color-row">
+        <input type="color" id="cBg" oninput="setVar('--bg',this.value)">
+        <span>Cor de fundo do editor</span>
+      </div>
+      <div class="slabel">Texto</div>
+      <div class="color-row">
+        <input type="color" id="cText" oninput="setVar('--text',this.value)">
+        <span>Cor do texto</span>
+      </div>
+      <div class="slabel">Destaque</div>
+      <div class="color-row">
+        <input type="color" id="cAccent" oninput="setVar('--accent',this.value)">
+        <span>Cor de destaque</span>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel-title">Tipografia</div>
+    <div class="sg">
+      <div class="slabel">Fonte do editor</div>
+      <select id="fontSel" onchange="applyFont()">
+        <option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+        <option value="'Courier New', monospace">Courier New</option>
+        <option value="'Inter', sans-serif">Inter</option>
+        <option value="Georgia, serif">Georgia</option>
+        <option value="system-ui, sans-serif">Sistema</option>
+      </select>
+
+      <div class="slabel">Tamanho: <b id="fsVal">15</b>px</div>
+      <input type="range" min="11" max="28" value="15" id="fsRange" oninput="applyFontSize(this.value)">
+
+      <div class="slabel">Espaçamento entre linhas: <b id="lhVal">1.75</b></div>
+      <input type="range" min="12" max="30" value="17" id="lhRange" oninput="applyLineHeight(this.value)">
+    </div>
+  </div>
+
+  <div>
+    <div class="panel-title">Editor</div>
+    <div class="sg">
+      <div class="tog-row">
+        <span class="slabel">Quebra de linha automática</span>
+        <label class="tog"><input type="checkbox" id="wrapTgl" onchange="toggleWrap()"><span class="sl"></span></label>
+      </div>
+      <div class="tog-row">
+        <span class="slabel">Verificação ortográfica</span>
+        <label class="tog"><input type="checkbox" id="spellTgl" checked onchange="toggleSpell()"><span class="sl"></span></label>
+      </div>
+      <div class="tog-row">
+        <span class="slabel">Auto-save (5s)</span>
+        <label class="tog"><input type="checkbox" id="autoSaveTgl" onchange="toggleAutoSave()"><span class="sl"></span></label>
+      </div>
+      <div class="tog-row">
+        <span class="slabel">Números de linha</span>
+        <label class="tog"><input type="checkbox" id="lnTgl" checked onchange="toggleLineNumbers()"><span class="sl"></span></label>
+      </div>
+      <div class="tog-row">
+        <span class="slabel">Links como chips</span>
+        <label class="tog"><input type="checkbox" id="chipTgl" onchange="toggleLinkChips()"><span class="sl"></span></label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".txt,.md,.log,.csv,.json,.xml,.html,.js,.css,.py,.ts,.jsx,.tsx,.sh,.yaml,.yml" onchange="handleOpen(event)">
+<div id="notif"></div>
+
+
+
+
+
+
+<script src="main.js"></script>
+
+</body>
+</html>
