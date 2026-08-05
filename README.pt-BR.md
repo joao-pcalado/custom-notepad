@@ -237,7 +237,9 @@ Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy p
 
 ## Capturas de Tela
 
-> _Adicione capturas de tela aqui mostrando diferentes temas, o minimap, os chips de link e o modo foco._
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
 
 ---
 
