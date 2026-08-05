@@ -253,7 +253,7 @@ Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy p
 
 ## Licença
 
-MIT © [Seu Nome](https://github.com/seu-usuario)
+MIT © [João P. Calado](https://github.com/joao-pcalado)
 
 ---
 
