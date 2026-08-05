@@ -239,7 +239,9 @@ Fetching page titles from arbitrary URLs is blocked by CORS. The app uses the pu
 
 ## Screenshots
 
-> _Add screenshots here showing different themes, the minimap, link chips, and focus mode._
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
 
 ---
 
