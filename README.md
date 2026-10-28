@@ -295,7 +295,7 @@ Fetching page titles from arbitrary URLs is blocked by CORS. The app uses the pu
 
 ## License
 
-MIT © [joao-pcalado](https://github.com/joao-pcalado)
+MIT © [João P. Calado](https://github.com/joao-pcalado)
 
 ---
 
