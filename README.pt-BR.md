@@ -20,7 +20,7 @@
 
 O **Bloco Custom** nasceu de uma necessidade pessoal: substituir o Bloco de Notas do Windows por algo mais agradável e flexível. O que começou como um arquivo HTML simples evoluiu para um editor de texto completo no estilo desktop, empacotável como executável nativo.
 
-A aplicação inteira são **três arquivos** sem dependências externas em tempo de execução — uma demonstração do que é possível alcançar com os padrões web puros.
+A aplicação inteira são **quatro arquivos** sem dependências externas em tempo de execução — uma demonstração do que é possível alcançar com os padrões web puros.
 
 ---
 
@@ -30,7 +30,12 @@ A aplicação inteira são **três arquivos** sem dependências externas em temp
 bloco-custom/
 ├── index.html      — Marcação: toda a estrutura e layout da interface
 ├── style.css       — Estilos: temas, componentes, CSS custom properties
-├── main.js         — Lógica: editor, abas, minimap, arquivos, chips de link
+├── utils.js        — Funções puras (busca, URLs, contagem…) usadas também pelos testes
+├── main.js         — Lógica: editor, abas, minimap, arquivos, chips de link, sessão
+├── manifest.webmanifest — Torna o app instalável e o registra para abrir .txt, .md…
+├── sw.js           — Service worker: o app instalado funciona offline
+├── icons/          — Ícones do app
+├── tests/          — Testes no navegador, sem dependências (unitários + integração)
 ├── README.md
 └── README.pt-BR.md
 ```
@@ -42,15 +47,17 @@ bloco-custom/
 ### Editor Principal
 - **`contenteditable` div** como superfície de edição — permite nós HTML reais inline (usado para os chips de link)
 - **Números de linha** sincronizados com o scroll, com destaque na linha atual — estilo VS Code
-- **Tecla Tab** insere 4 espaços (sem armadilha de foco)
-- **Quebra de linha** configurável
+- **Tecla Tab** insere 4 espaços, `Shift+Tab` remove; `Enter` mantém a indentação da linha
+- **Colar é sempre texto puro** — formatação de páginas ou do Word não entra na nota
+- **Quebra de linha** configurável (`Alt+Z`)
 - **Verificação ortográfica** configurável
-- **Contagem de palavras, caracteres, linha e coluna** em tempo real na barra de status
+- **Contagem de palavras, caracteres, linha, coluna e seleção** em tempo real na barra de status, além do fim de linha do arquivo (LF/CRLF)
 
 ### Sistema de Abas
 - **Múltiplas abas** — abra quantos arquivos precisar simultaneamente
-- **Reordenação por arrastar e soltar** entre abas
-- **Indicador de alterações não salvas** (●) por aba
+- **Reordenação por arrastar e soltar**; **duplo clique para renomear**, clique do meio para fechar
+- **Indicador de alterações não salvas** (●) por aba e no título da janela
+- **Sessão restaurada** — as abas abertas (e o texto não salvo) voltam ao reabrir o app
 - Atalhos: `Ctrl+T` nova aba, `Ctrl+W` fechar, `Ctrl+Tab` navegar
 
 ### Minimap
@@ -65,21 +72,23 @@ bloco-custom/
 - **Preview de link inline** opcional — quando ativado, URLs brutas são substituídas por chips estilizados diretamente no editor
 - Cada chip exibe o **favicon do site**, **título da página** (obtido de forma assíncrona) e o **domínio**
 - Construído com nós `contentEditable="false"` — os chips se comportam como caracteres atômicos (selecionáveis e deletáveis)
-- Títulos obtidos via proxy CORS com fallback gracioso para o domínio
-- Passar o mouse sobre um chip revela a URL completa em um tooltip
+- Títulos obtidos via proxy CORS com fallback gracioso para o domínio (o link é enviado ao `allorigins.win`)
+- Uma URL ainda sendo digitada continua como texto; vira chip quando o cursor sai dela
+- Passar o mouse sobre um chip revela a URL completa em um tooltip; copiar copia a URL
 - Ativar/desativar no painel de Configurações
 
 ### Operações com Arquivos
-- **Abrir** — lê `.txt`, `.md`, `.log`, `.json`, `.html`, `.js`, `.css`, `.py`, `.ts`, `.sh`, `.yaml` e outros
-- **Salvar / Salvar como** — faz download do arquivo com o nome correto
-- **Auto-save** — opcional, dispara 5 segundos após o último pressionamento de tecla
-- **Arquivos recentes** — dropdown registra os últimos 10 arquivos abertos
+- **Abrir** — lê `.txt`, `.md`, `.log`, `.json`, `.html`, `.js`, `.css`, `.py`, `.ts`, `.sh`, `.yaml` e outros, ou **arraste arquivos para a janela**
+- **Salvar** — no Chrome/Edge (File System Access API) grava **no próprio arquivo** do disco; nos outros navegadores faz download
+- **Fim de linha preservado** — arquivos CRLF continuam CRLF ao salvar
+- **Arquivos recentes** — dropdown guarda os últimos 10 arquivos *com o conteúdo*, para reabrir depois
 
 ### Buscar e Substituir
-- **Busca com contagem de resultados em tempo real** (`Ctrl+F`)
+- **Busca com contagem em tempo real** (`Ctrl+F`), com todos os resultados destacados no texto
 - Navegação entre resultados com `↑` / `↓` ou `Enter` / `Shift+Enter`
-- **Substituir** individual ou **Substituir tudo**
-- Opções de diferenciação de maiúsculas e palavra inteira
+- **Substituir** (`Enter` no campo) ou **Substituir tudo** (`Ctrl+Enter`) — ambos podem ser desfeitos com `Ctrl+Z`
+- Opções de diferenciação de maiúsculas e palavra inteira (que entende acentos)
+- O texto de substituição é literal — `$&` ou `$1` não são interpretados
 
 ### Personalização
 - **9 temas integrados**: Noite Azul, Floresta, Carvão, Lavanda, Papel, Neve, Terminal, Oceano, Róseo
@@ -87,10 +96,10 @@ bloco-custom/
 - **5 famílias de fonte**: JetBrains Mono, Courier New, Inter, Georgia, Sistema
 - **Slider de tamanho de fonte** (11–28px)
 - **Slider de espaçamento entre linhas**
-- Todas as preferências aplicadas instantaneamente via CSS custom properties
+- Todas as preferências aplicadas instantaneamente via CSS custom properties e **lembradas** entre sessões
 
 ### Modo Foco
-- `F11` entra no **modo sem distração** — as barras de UI somem, reaparecem ao passar o mouse
+- `F11` entra no **modo sem distração** — as barras de UI somem e reaparecem ao passar o mouse sobre elas
 - Coluna do editor limitada a 760px para escrita confortável de textos longos
 
 ---
@@ -107,29 +116,56 @@ bloco-custom/
 | `Ctrl+W` | Fechar aba atual |
 | `Ctrl+Tab` | Próxima aba |
 | `Ctrl+Shift+Tab` | Aba anterior |
-| `Ctrl+F` | Buscar e Substituir |
+| `Ctrl+F` | Buscar |
+| `Ctrl+H` | Buscar e Substituir |
 | `Ctrl+Shift+P` | Alternar Minimap |
 | `Ctrl+,` | Abrir Configurações |
+| `Alt+Z` | Alternar quebra de linha |
 | `F11` | Alternar Modo Foco |
+
+> Numa aba comum do navegador, `Ctrl+N`, `Ctrl+T`, `Ctrl+W` e `Ctrl+Tab` são reservados pelo próprio navegador. Eles funcionam quando o app roda empacotado como desktop (veja abaixo).
 
 ---
 
 ## Como Usar
 
+### Usar como bloco de notas do Windows
+
+O Bloco é um app instalável (PWA). Instalado, ele ganha janela e ícone próprios, funciona offline e aparece no **"Abrir com"** do Windows para `.txt`, `.md`, `.log`, `.json`, `.csv` e outros.
+
+1. Abra **https://joao-pcalado.github.io/custom-notepad/** no **Edge**, **Chrome** ou **Brave**.
+2. Clique em **⬇ Instalar app**, na barra do Bloco (ou no ícone de instalar da barra de endereço).
+3. Clique com o botão direito num `.txt` → **Abrir com** → **Escolher outro aplicativo** → **Bloco** → **Sempre**.
+   (Ou: Configurações do Windows → Aplicativos → Aplicativos padrão → `.txt` → Bloco.)
+4. Na primeira vez, o navegador pergunta se o Bloco pode abrir esses arquivos — permita.
+
+Arquivos abertos assim entram como abas na mesma janela, e o `Ctrl+S` grava direto no arquivo, inclusive depois de fechar e reabrir o app.
+
 ### Rodar no Navegador
 
 ```bash
 # Clone o repositório
-git clone https://github.com/seu-usuario/bloco-custom.git
-cd bloco-custom
-```
+git clone https://github.com/joao-pcalado/custom-notepad.git
+cd custom-notepad
 
-Como o `index.html` carrega `main.js` e `style.css` como arquivos separados, ele precisa ser servido localmente. Use o **Live Server** do VS Code, ou rode:
-
-```bash
+# Sirva a pasta (qualquer servidor estático serve)
 npx serve .
 # → Disponível em http://localhost:3000
 ```
+
+Abrir o `index.html` direto também funciona para editar, mas um servidor local é o recomendado (o **Live Server** do VS Code também serve).
+
+### Rodar os Testes
+
+Os testes não têm dependências — rodam no próprio navegador. Com o projeto servido (acima), abra:
+
+```
+http://localhost:3000/tests/
+```
+
+A página roda testes unitários do `utils.js` e testes de integração que carregam o app real num iframe (digitação, abas, buscar/substituir, arquivos, sessão, chips de link). Adicione `?grep=texto` na URL para rodar só os testes que batem com o filtro. O resultado também fica em `window.__testResults`, para automação.
+
+Os testes abrem o app no modo `?test`, que usa chaves de armazenamento separadas e não acessa a rede — suas notas reais nunca são tocadas.
 
 ---
 
@@ -178,7 +214,7 @@ npm install -g @tauri-apps/cli
 #### Configuração
 
 ```bash
-cd bloco-custom
+cd custom-notepad
 
 # Inicialize o Tauri no projeto
 npm create tauri-app@latest -- --template vanilla
@@ -206,23 +242,26 @@ O binário final ficará em `src-tauri/target/release/` — tipicamente **5–10
 ## Arquitetura
 
 ```
-index.html   — Shell: importação de fontes, link do CSS, estrutura HTML, tag do script
+index.html   — Shell: importação de fontes, link do CSS, estrutura HTML, tags de script
 style.css    — Todos os estilos usando CSS custom properties para temas em tempo real
-main.js      — Lógica completa da aplicação (~600 linhas de JS puro)
-    ├── Motor de abas     Gerenciamento de estado contenteditable por aba
+utils.js     — Funções puras (sem estado do editor), cobertas por testes unitários
+main.js      — Lógica completa da aplicação (JS puro)
+    ├── Modelo do editor  DOM ⇄ texto puro e offsets de texto ⇄ posições no DOM
+    ├── Motor de abas     Conteúdo, cursor, scroll e arquivo de cada aba
     ├── Gutter            Renderização de números de linha sincronizada com scroll
     ├── Minimap           Visão geral em canvas com navegação por clique/arraste
     ├── Chips de link     Conversão inline de URL → chip com busca assíncrona de títulos
-    ├── Busca/Substituição Busca em regex com navegação entre resultados
-    ├── I/O de arquivos   FileReader API para abrir, Blob URL para salvar
-    ├── Motor de temas    Injeção de CSS custom properties
-    └── Auto-save         Save com debounce via setTimeout
+    ├── Busca/Substituição Regex, CSS Custom Highlight API, substituição que pode ser desfeita
+    ├── I/O de arquivos   File System Access API, com download como alternativa
+    ├── Sessão            Abas e preferências guardadas no localStorage
+    └── Motor de temas    Injeção de CSS custom properties
+tests/       — Mini executor de testes + testes unitários e de integração
 ```
 
 ### Decisões Técnicas
 
 **`contenteditable` em vez de `<textarea>`**
-Textarea renderiza apenas texto puro. O recurso de chips exige nós DOM reais inline com o texto, só possível com `contenteditable`. Uma função `getEditorText()` percorre a árvore DOM para extrair o texto puro (incluindo URLs dos chips) para salvar e calcular estatísticas.
+Textarea renderiza apenas texto puro. O recurso de chips exige nós DOM reais inline com o texto, só possível com `contenteditable`. Uma única função (`serializeEditor()`) percorre o DOM e gera o texto puro — URLs dos chips, `<br>` e `\n` como quebras, ignorando a quebra "sentinela" que o navegador adiciona para exibir uma última linha vazia — e converte posições do cursor em offsets de texto e vice-versa. As edições passam por `document.execCommand('insertText')` sempre que possível, para o desfazer nativo (`Ctrl+Z`) continuar funcionando.
 
 **Canvas para o minimap**
 O minimap renderiza o texto em ~18% do tamanho em um `<canvas>`, redesenhando a cada input com debounce via `requestAnimationFrame`. Eventos de clique e arraste mapeiam para proporções de scroll, tornando-o independente de resolução.
@@ -231,20 +270,23 @@ O minimap renderiza o texto em ~18% do tamanho em um `<canvas>`, redesenhando a 
 Todas as cores são variáveis CSS em `:root`. Troca de tema e seletores de cor chamam `root.style.setProperty()` — sem alternância de classes, atualização instantânea.
 
 **Proxy CORS para metadados de links**
-Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy público `allorigins.win` para obter o HTML bruto e extrai `<title>` e `og:title` via regex. Resultados em cache na memória.
+Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy público `allorigins.win` para obter o HTML bruto e lê `og:title` / `<title>` com `DOMParser` (que nunca executa os scripts da página). Resultados em cache na memória. Como cada link é enviado a um terceiro, o recurso vem desligado.
 
 ---
 
 ## Capturas de Tela
 
-> _Adicione capturas de tela aqui mostrando diferentes temas, o minimap, os chips de link e o modo foco._
+![Editor](image.png)
+![Painel de configurações e temas](image-1.png)
+![Chips de link](image-2.png)
 
 ---
 
 ## Próximos Passos
 
 - [ ] Syntax highlighting de Markdown no editor
-- [ ] Persistência de sessão via `localStorage`
+- [x] Persistência de sessão via `localStorage`
+- [ ] Números de linha alinhados com linhas quebradas (hoje ficam ocultos com a quebra automática ligada)
 - [ ] Visualização em painel dividido (dois editores lado a lado)
 - [ ] Exportação e importação de temas personalizados em JSON
 - [ ] Pipeline de build com Tauri e auto-updater
@@ -253,7 +295,7 @@ Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy p
 
 ## Licença
 
-MIT © [Seu Nome](https://github.com/seu-usuario)
+MIT © [joao-pcalado](https://github.com/joao-pcalado)
 
 ---
 

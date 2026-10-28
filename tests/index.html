@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Testes — Bloco</title>
+  <style>
+    :root { --bg:#ffffff; --text:#1a1a2e; --muted:#667; --ok:#1a7f37; --bad:#c62828; --line:#e3e3ea; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#16161e; --text:#e0e0e0; --muted:#8a8aa0; --ok:#4ade80; --bad:#f87171; --line:#2a2a38; }
+    }
+    body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+           font:14px/1.5 system-ui, sans-serif; max-width:960px; margin-inline:auto; }
+    h1 { font-size:20px; margin:0 0 4px; }
+    p.hint { color:var(--muted); margin:0 0 16px; font-size:13px; }
+    #summary { font-weight:600; padding:10px 12px; border:1px solid var(--line); border-radius:8px; margin-bottom:20px; }
+    #summary.pass { color:var(--ok); border-color:var(--ok); }
+    #summary.fail { color:var(--bad); border-color:var(--bad); }
+    h2 { font-size:14px; margin:18px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--line); }
+    .test { padding:2px 0; font-size:13px; }
+    .test.pass { color:var(--ok); }
+    .test.fail { color:var(--bad); font-weight:600; }
+    .test pre { font-weight:400; white-space:pre-wrap; font-size:12px; color:var(--text);
+                background:color-mix(in srgb, var(--bad) 10%, transparent); padding:8px; border-radius:6px; }
+    /* o app roda dentro deste iframe durante os testes de integração */
+    #app { width:1000px; height:600px; max-width:100%; border:1px solid var(--line); border-radius:8px; margin-top:24px; }
+  </style>
+</head>
+<body>
+  <h1>Testes do Bloco</h1>
+  <p class="hint">Sirva a pasta do projeto (ex.: <code>npx serve .</code>) e abra <code>/tests/</code>. Use <code>?grep=texto</code> para filtrar.</p>
+  <div id="summary">Rodando…</div>
+  <div id="results"></div>
+  <iframe id="app" title="App em teste"></iframe>
+
+  <script src="../utils.js"></script>
+  <script src="runner.js"></script>
+  <script src="utils.test.js"></script>
+  <script src="app.test.js"></script>
+  <script>runTests();</script>
+</body>
+</html>

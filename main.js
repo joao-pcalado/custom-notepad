@@ -1,146 +1,219 @@
 // ══════════════════════════════════════════════════
 // STATE
 // ══════════════════════════════════════════════════
-const editor    = document.getElementById('editor');
-const gutter    = document.getElementById('gutter');
-const previewEl = document.getElementById('preview-pane');
-const root      = document.documentElement;
+const U      = window.BlocoUtils;
+const $      = id => document.getElementById(id);
+const editor = $('editor');
+const gutter = $('gutter');
+const root   = document.documentElement;
+
+// ?test → armazenamento separado, sem rede (usado por tests/)
+const TEST_MODE    = new URLSearchParams(location.search).has('test');
+const STORE        = TEST_MODE ? 'blocoTest:' : '';
+const RECENT_KEY   = STORE + 'blocoCustomRecent';
+const SESSION_KEY  = STORE + 'blocoCustomSession';
+const SETTINGS_KEY = STORE + 'blocoCustomSettings';
+const RECENT_MAX_CHARS = 200000;   // conteúdo maior que isso fica só com o nome
+const BIG_FILE_BYTES   = 2 * 1024 * 1024;
+
+const DEFAULT_SETTINGS = {
+  theme: 0, colors: null,
+  font: "'JetBrains Mono', monospace", fs: 15, lh: 1.75,
+  wrap: false, spell: true, lineNumbers: true, chips: false,
+  minimap: true, session: true,
+};
+const settings = Object.assign({}, DEFAULT_SETTINGS, loadJSON(SETTINGS_KEY, {}));
 
 let tabs = [];
 let activeTab = null;
 let tabCounter = 0;
 
-let previewOn   = true; // minimap visível por padrão
-let focusOn     = false;
-let autoSaveTimer = null;
-let autoSaveOn  = false;
+let currentText = '';               // texto do editor, atualizado a cada input
+let caret = { start: 0, end: 0, line: 1, col: 1 };
+let focusOn = false;
 let findMatches = [], findIdx = 0;
 
-const RECENT_KEY = 'blocoCustomRecent';
-let recentFiles = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+// ══════════════════════════════════════════════════
+// STORAGE
+// ══════════════════════════════════════════════════
+function loadJSON(key, fallback) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return v === null || v === undefined ? fallback : v;
+  } catch { return fallback; }
+}
+
+function saveJSON(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch { return false; }
+}
+
+function saveSetting(key, value) {
+  settings[key] = value;
+  saveJSON(SETTINGS_KEY, settings);
+}
 
 // ══════════════════════════════════════════════════
 // TABS
 // ══════════════════════════════════════════════════
-function newTab(name, content) {
-  const id = ++tabCounter;
-  const tab = {
-    id,
+function makeTab(name, content, extra) {
+  return Object.assign({
+    id: ++tabCounter,
+    uid: Date.now().toString(36) + Math.random().toString(36).slice(2), // estável entre sessões
     name: name || 'Sem título',
     content: content || '',
     dirty: false,
     scrollTop: 0,
     selStart: 0,
     selEnd: 0,
-    filePath: null,
-  };
+    eol: '\n',       // fim de linha original do arquivo ('\n' ou '\r\n')
+    handle: null,    // FileSystemFileHandle, quando aberto/salvo pelo seletor nativo
+  }, extra);
+}
+
+function newTab(name, content, extra) {
+  const tab = makeTab(name, content, extra);
   tabs.push(tab);
-  renderTabs();
-  switchTab(id);
+  switchTab(tab.id);
+  schedulePersist();
   return tab;
 }
 
 function switchTab(id) {
-  if (activeTab) {
-    activeTab.content   = getEditorText();
+  const next = tabs.find(t => t.id === id);
+  if (!next) return;
+  if (activeTab && activeTab !== next) {
+    activeTab.content   = currentText;
     activeTab.scrollTop = editor.scrollTop;
+    activeTab.selStart  = caret.start;
+    activeTab.selEnd    = caret.end;
   }
-  activeTab = tabs.find(t => t.id === id);
-  if (!activeTab) return;
+  activeTab = next;
 
   setEditorText(activeTab.content);
+  currentText = activeTab.content;
+  editor.focus({ preventScroll: true });
+  setSelectionOffsets(activeTab.selStart, activeTab.selEnd);
   editor.scrollTop = activeTab.scrollTop;
 
   renderTabs();
-  updateStats();
-  updateCursor();
-  updateGutter();
   updateStatusFile();
+  refreshEditorUI();
+  if (findOpen()) doFind();
 }
 
 function closeTab(id, e) {
   if (e) e.stopPropagation();
   const idx = tabs.findIndex(t => t.id === id);
+  if (idx === -1) return;
   const tab = tabs[idx];
   if (tab.dirty && !confirm(`Fechar "${tab.name}" sem salvar?`)) return;
   tabs.splice(idx, 1);
-  if (tabs.length === 0) { newTab(); return; }
-  if (activeTab && activeTab.id === id) {
-    const next = tabs[Math.min(idx, tabs.length - 1)];
-    switchTab(next.id);
+  if (tabs.length === 0) {
+    activeTab = null;
+    newTab();
+  } else if (activeTab === tab) {
+    activeTab = null;
+    switchTab(tabs[Math.min(idx, tabs.length - 1)].id);
   } else {
     renderTabs();
   }
+  schedulePersist();
+}
+
+function renameTab(id) {
+  const tab = tabs.find(t => t.id === id);
+  if (!tab) return;
+  const name = prompt('Renomear aba:', tab.name);
+  if (name === null || !name.trim()) return;
+  tab.name = name.trim();
+  renderTabs();
+  updateStatusFile();
+  schedulePersist();
 }
 
 let dragSrcId = null;
 
 function renderTabs() {
-  const bar = document.getElementById('tabbar');
+  const bar = $('tabbar');
   const newBtn = bar.querySelector('.new-tab-btn');
-  bar.innerHTML = '';
-  bar.appendChild(newBtn);
+  bar.replaceChildren(newBtn);
 
   tabs.forEach(tab => {
     const el = document.createElement('div');
-    el.className = 'tab' + (activeTab && activeTab.id === tab.id ? ' active' : '');
+    el.className = 'tab' + (activeTab === tab ? ' active' : '');
     el.draggable = true;
     el.dataset.id = tab.id;
+    el.title = tab.name + ' — duplo clique para renomear';
 
-    el.innerHTML = `
-      <span class="tab-name">${escHtml(tab.name)}</span>
-      ${tab.dirty ? '<span class="dirty">●</span>' : ''}
-      <button class="close-tab" onclick="closeTab(${tab.id},event)">×</button>
-    `;
+    const name = document.createElement('span');
+    name.className = 'tab-name';
+    name.textContent = tab.name;
+    el.appendChild(name);
 
-    // click para trocar de aba (ignora se veio de botão fechar)
-    el.addEventListener('click', e => {
-      if (!e.target.classList.contains('close-tab')) switchTab(tab.id);
-    });
+    if (tab.dirty) {
+      const dot = document.createElement('span');
+      dot.className = 'dirty';
+      dot.textContent = '●';
+      el.appendChild(dot);
+    }
 
-    // drag events
+    const close = document.createElement('button');
+    close.className = 'close-tab';
+    close.textContent = '×';
+    close.title = 'Fechar (Ctrl+W)';
+    close.addEventListener('click', e => closeTab(tab.id, e));
+    el.appendChild(close);
+
+    el.addEventListener('click', () => { if (activeTab !== tab) switchTab(tab.id); });
+    el.addEventListener('dblclick', e => { if (e.target !== close) renameTab(tab.id); });
+    el.addEventListener('auxclick', e => { if (e.button === 1) closeTab(tab.id, e); });
+
+    // reordenação por arrastar
     el.addEventListener('dragstart', e => {
       dragSrcId = tab.id;
       el.classList.add('dragging');
       e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/x-bloco-tab', String(tab.id));
     });
-
     el.addEventListener('dragend', () => {
+      dragSrcId = null;
       el.classList.remove('dragging');
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+      bar.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
     });
-
     el.addEventListener('dragover', e => {
+      if (dragSrcId === null) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+      bar.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
       if (tab.id !== dragSrcId) el.classList.add('drag-over');
     });
-
     el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
-
     el.addEventListener('drop', e => {
+      if (dragSrcId === null) return;
       e.preventDefault();
       el.classList.remove('drag-over');
-      if (dragSrcId === null || dragSrcId === tab.id) return;
-
-      const fromIdx = tabs.findIndex(t => t.id === dragSrcId);
-      const toIdx   = tabs.findIndex(t => t.id === tab.id);
-      if (fromIdx === -1 || toIdx === -1) return;
-
-      // reorder
-      const [moved] = tabs.splice(fromIdx, 1);
-      tabs.splice(toIdx, 0, moved);
-      dragSrcId = null;
-      renderTabs();
+      moveTab(dragSrcId, tab.id);
     });
 
     bar.insertBefore(el, newBtn);
   });
+
+  bar.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function moveTab(fromId, toId) {
+  const fromIdx = tabs.findIndex(t => t.id === fromId);
+  const toIdx   = tabs.findIndex(t => t.id === toId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = tabs.splice(fromIdx, 1);
+  tabs.splice(toIdx, 0, moved);
+  renderTabs();
+  schedulePersist();
 }
 
 function setDirty(val) {
-  if (!activeTab) return;
+  if (!activeTab || activeTab.dirty === val) return;
   activeTab.dirty = val;
   renderTabs();
   updateStatusFile();
@@ -148,136 +221,349 @@ function setDirty(val) {
 
 function updateStatusFile() {
   if (!activeTab) return;
-  document.getElementById('sFile').textContent = activeTab.name + (activeTab.dirty ? ' ●' : '');
+  $('sFile').textContent = activeTab.name + (activeTab.dirty ? ' ●' : '');
+  $('sEol').textContent  = activeTab.eol === '\r\n' ? 'CRLF' : 'LF';
+  document.title = (activeTab.dirty ? '● ' : '') + activeTab.name + ' — Bloco';
+}
+
+// ══════════════════════════════════════════════════
+// EDITOR MODEL (contenteditable ⇄ texto puro)
+// ══════════════════════════════════════════════════
+// O DOM do editor contém texto, <br> e chips de link. O texto equivalente:
+//  - nó de texto → como está;  <br> → '\n';  chip → sua URL;
+//  - blocos (<div>, <p>…) começam/terminam linhas;
+//  - a última quebra de um bloco (um <br>, ou o '\n' final do último nó de texto,
+//    que o Chrome usa com white-space: pre) é "sentinela": o navegador precisa
+//    dela para exibir uma linha final vazia, mas ela não representa um caractere.
+const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'TR', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+
+const isChip = n => n.nodeType === Node.ELEMENT_NODE && n.classList.contains('link-chip');
+const indexOfNode = n => Array.prototype.indexOf.call(n.parentNode.childNodes, n);
+
+function isLastInBlock(node) {
+  const p = node.parentNode;
+  if (p !== editor && !BLOCK_TAGS.has(p.nodeName)) return false;
+  for (let n = node.nextSibling; n; n = n.nextSibling) {
+    if (n.nodeType !== Node.TEXT_NODE || n.data !== '') return false;
+  }
+  return true;
+}
+
+function normalizePoint(node, offset) {
+  if (!node || !editor.contains(node)) return null;
+  for (let n = node; n && n !== editor; n = n.parentNode) {
+    if (isChip(n)) return { node: n.parentNode, offset: indexOfNode(n) + 1 };
+  }
+  return { node, offset };
+}
+
+// Percorre o DOM uma vez: devolve o texto, os "pedaços" (para mapear offset → DOM)
+// e o offset de texto de cada ponto {node, offset} pedido.
+function serializeEditor(rawPoints) {
+  const points  = (rawPoints || []).map(p => p && normalizePoint(p.node, p.offset));
+  const offsets = points.map(() => null);
+  const lazy    = [];   // pontos que caem antes de uma quebra virtual ainda pendente
+  const pieces  = [];
+  const parts   = [];
+  let len = 0, pending = false;
+
+  const emit = s => { parts.push(s); len += s.length; };
+  const flush = () => {
+    if (!pending) return;
+    pending = false;
+    pieces.push({ kind: 'virtual', start: len, end: len + 1 });
+    emit('\n');
+    lazy.splice(0).forEach(i => { offsets[i] = len; });
+  };
+  const resolve = (i, value) => {
+    if (offsets[i] !== null || lazy.includes(i)) return;
+    if (value === undefined) { if (pending) lazy.push(i); else offsets[i] = len; }
+    else offsets[i] = value;
+  };
+  const markBoundary = (el, idx) => points.forEach((p, i) => {
+    if (p && p.node === el && p.offset === idx) resolve(i);
+  });
+
+  function walk(el) {
+    const kids = el.childNodes;
+    for (let i = 0; i < kids.length; i++) {
+      markBoundary(el, i);
+      visit(kids[i]);
+    }
+    markBoundary(el, kids.length);
+  }
+
+  function visit(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      let t = node.data;
+      if (t.endsWith('\n') && isLastInBlock(node)) t = t.slice(0, -1); // '\n' sentinela
+      if (t || node.data) flush();
+      points.forEach((p, i) => {
+        if (p && p.node === node) resolve(i, t || !pending ? len + Math.min(p.offset, t.length) : undefined);
+      });
+      if (t) { pieces.push({ kind: 'text', node, start: len, end: len + t.length }); emit(t); }
+    } else if (node.nodeName === 'BR') {
+      flush();
+      if (isLastInBlock(node)) {
+        pieces.push({ kind: 'placeholder', node, start: len, end: len });
+      } else {
+        pieces.push({ kind: 'br', node, start: len, end: len + 1 });
+        emit('\n');
+      }
+    } else if (isChip(node)) {
+      flush();
+      const url = node.dataset.url || '';
+      pieces.push({ kind: 'chip', node, start: len, end: len + url.length });
+      emit(url);
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const block = BLOCK_TAGS.has(node.nodeName);
+      if (block && len > 0) pending = true;
+      walk(node);
+      if (block) pending = true;
+    }
+  }
+
+  walk(editor);
+  lazy.forEach(i => { offsets[i] = len; });
+  return { text: parts.join(''), pieces, offsets };
+}
+
+function getEditorText() { return serializeEditor().text; }
+
+// offset de texto → ponto no DOM
+function pointAt(offset, pieces) {
+  const before = n => ({ node: n.parentNode, offset: indexOfNode(n) });
+  for (const p of pieces) {
+    if (p.kind === 'text' && offset >= p.start && offset <= p.end) return { node: p.node, offset: offset - p.start };
+    if ((p.kind === 'br' || p.kind === 'placeholder') && offset === p.start) return before(p.node);
+    if (p.kind === 'chip' && offset >= p.start && offset <= p.end) {
+      const b = before(p.node);
+      return offset === p.start ? b : { node: b.node, offset: b.offset + 1 };
+    }
+  }
+  return { node: editor, offset: editor.childNodes.length };
+}
+
+function rangeFromOffsets(start, end, pieces) {
+  pieces = pieces || serializeEditor().pieces;
+  const a = pointAt(start, pieces);
+  const b = end === start ? a : pointAt(end, pieces);
+  const r = document.createRange();
+  r.setStart(a.node, a.offset);
+  r.setEnd(b.node, b.offset);
+  return r;
+}
+
+function getSelectionOffsets() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  const r = sel.getRangeAt(0);
+  if (!editor.contains(r.startContainer)) return null;
+  const { text, offsets } = serializeEditor([
+    { node: r.startContainer, offset: r.startOffset },
+    { node: r.endContainer,   offset: r.endOffset },
+  ]);
+  if (offsets[0] === null) return null;
+  return { start: offsets[0], end: offsets[1] === null ? offsets[0] : offsets[1], text };
+}
+
+function setSelectionOffsets(start, end) {
+  const len = currentText.length;
+  start = Math.max(0, Math.min(start || 0, len));
+  end   = Math.max(start, Math.min(end === undefined ? start : end, len));
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(rangeFromOffsets(start, end));
+}
+
+// texto → DOM. `urls` = links a renderizar como chip (padrão: todos, se chips ativos)
+function setEditorText(text, urls) {
+  text = text || '';
+  if (urls === undefined) urls = linkChipsOn ? U.findUrls(text) : [];
+  const frag = document.createDocumentFragment();
+  const pushText = s => s.split('\n').forEach((line, i) => {
+    if (i) frag.appendChild(document.createElement('br'));
+    if (line) frag.appendChild(document.createTextNode(line));
+  });
+
+  let pos = 0;
+  urls.forEach(m => {
+    pushText(text.slice(pos, m.index));
+    frag.appendChild(buildChipNode(m.url));
+    if (!linkCache[m.url]) fetchLinkMeta(m.url);
+    pos = m.index + m.url.length;
+  });
+  pushText(text.slice(pos));
+  if (text.endsWith('\n')) frag.appendChild(document.createElement('br')); // sentinela
+
+  editor.replaceChildren(frag);
+  editor.classList.toggle('is-empty', text === '');
+}
+
+// re-renderiza o editor a partir do texto, sem perder cursor/scroll
+function rerenderEditor(urls) {
+  const sel = document.activeElement === editor ? getSelectionOffsets() : null;
+  const top = editor.scrollTop, left = editor.scrollLeft;
+  setEditorText(currentText, urls);
+  if (sel) setSelectionOffsets(sel.start, sel.end);
+  editor.scrollTop = top;
+  editor.scrollLeft = left;
+}
+
+// substitui um trecho mantendo o histórico de desfazer (Ctrl+Z) do navegador
+function replaceRange(start, end, str) {
+  editor.focus({ preventScroll: true });
+  setSelectionOffsets(start, end);
+  const ok = str
+    ? document.execCommand('insertText', false, str)
+    : start === end || document.execCommand('delete');
+  if (!ok) {
+    currentText = currentText.slice(0, start) + str + currentText.slice(end);
+    setEditorText(currentText);
+    setSelectionOffsets(start + str.length);
+    onEditorInput();
+  }
 }
 
 // ══════════════════════════════════════════════════
 // EDITOR EVENTS
 // ══════════════════════════════════════════════════
-// ══════════════════════════════════════════════════
-// CONTENTEDITABLE HELPERS
-// ══════════════════════════════════════════════════
-function getEditorText() {
-  // walk childNodes to extract plain text, preserving newlines from <br> and block elements
-  function nodeText(node) {
-    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-    if (node.nodeName === 'BR') return '\n';
-    if (node.classList && node.classList.contains('link-chip')) {
-      // chip represents its data-url
-      return node.dataset.url || '';
-    }
-    let t = '';
-    node.childNodes.forEach(c => t += nodeText(c));
-    // block-level elements add a newline after
-    const block = ['DIV','P','LI','TR','BLOCKQUOTE'];
-    if (block.includes(node.nodeName) && node !== editor) t += '\n';
-    return t;
-  }
-  let text = nodeText(editor);
-  // remove trailing newline added by last div
-  if (text.endsWith('\n')) text = text.slice(0, -1);
-  return text;
-}
-
-function setEditorText(text) {
-  // Clear and re-render as chips-aware HTML
-  if (linkChipsOn) {
-    renderChipsFromText(text);
-  } else {
-    // plain text — set as divs per line (browser contenteditable convention)
-    editor.innerHTML = '';
-    const lines = (text || '').split('\n');
-    lines.forEach((line, i) => {
-      if (i === 0) {
-        // first line: text nodes directly
-        editor.appendChild(document.createTextNode(line));
-        if (lines.length > 1) editor.appendChild(document.createElement('br'));
-      } else {
-        editor.appendChild(document.createTextNode(line));
-        if (i < lines.length - 1) editor.appendChild(document.createElement('br'));
-      }
-    });
-  }
-}
-
-function getCaretOffset() {
-  // returns char offset of caret within getEditorText()
-  const sel = window.getSelection();
-  if (!sel || !sel.rangeCount) return 0;
-  const range = sel.getRangeAt(0).cloneRange();
-  range.setStart(editor, 0);
-  const tmp = document.createElement('span');
-  range.insertNode(tmp);
-  const text = getEditorText();
-  tmp.remove();
-  return text.length; // approximate — used only for line/col display
-}
-
-function getCaretLineCol() {
-  const sel = window.getSelection();
-  if (!sel || !sel.rangeCount) return { line:1, col:1 };
-  const range = sel.getRangeAt(0).cloneRange();
-  range.collapse(true);
-
-  // count newlines before caret by extracting text of a range from start to caret
-  const preRange = document.createRange();
-  preRange.setStart(editor, 0);
-  preRange.setEnd(range.startContainer, range.startOffset);
-  const div = document.createElement('div');
-  div.appendChild(preRange.cloneContents());
-  // replace chips with their URL text
-  div.querySelectorAll('.link-chip').forEach(c => c.replaceWith(c.dataset.url || ''));
-  const text = div.innerText || div.textContent || '';
-  const lines = text.split('\n');
-  return { line: lines.length, col: (lines[lines.length-1]||'').length + 1 };
-}
+// elementos que não pertencem ao modelo (ex.: HTML arrastado de outra página).
+// <div> é tolerado: o Chrome o usa em colagens de várias linhas, e reconstruir o
+// DOM nesse momento quebraria o Ctrl+Z.
+const FOREIGN_SELECTOR = ':not(br):not(div):not(.link-chip):not(.link-chip *)';
 
 function onEditorInput() {
   if (!activeTab) return;
-  // if chips on, re-render chips after typing
-  if (linkChipsOn) scheduleChipRender();
-  activeTab.content = getEditorText();
+  currentText = getEditorText();
+  if (editor.querySelector(FOREIGN_SELECTOR)) rerenderEditor();
+  activeTab.content = currentText;
+  editor.classList.toggle('is-empty', currentText === '');
   setDirty(true);
+  refreshEditorUI();
+  if (linkChipsOn) scheduleChipRender();
+  if (findOpen()) doFind(true);
+  schedulePersist();
+}
+
+function refreshEditorUI() {
   updateStats();
   updateCursor();
   updateGutter();
   updateMinimap();
-  if (autoSaveOn) scheduleAutoSave();
 }
 
 function updateStats() {
-  const val = getEditorText();
-  const words = val.trim() === '' ? 0 : val.trim().split(/\s+/).length;
-  document.getElementById('sWords').textContent = words;
-  document.getElementById('sChars').textContent = val.length;
-  document.getElementById('wcTop').textContent = words + (words === 1 ? ' palavra' : ' palavras');
+  const words = U.countWords(currentText);
+  $('sWords').textContent = words;
+  $('sChars').textContent = currentText.length;
+  $('wcTop').textContent  = U.formatWordCount(words);
 }
 
 function updateCursor() {
-  const { line, col } = getCaretLineCol();
-  document.getElementById('sLine').textContent = line;
-  document.getElementById('sCol').textContent  = col;
-  highlightCurrentLine();
+  const sel = getSelectionOffsets();
+  if (sel) {
+    const { line, col } = U.lineColAt(sel.text, sel.end);
+    caret = { start: sel.start, end: sel.end, line, col };
+  }
+  $('sLine').textContent = caret.line;
+  $('sCol').textContent  = caret.col;
+  const selLen = caret.end - caret.start;
+  $('sSel').textContent  = selLen ? `(${selLen} selecionados)` : '';
+  setGutterCurrent(caret.line);
+  updateMinimap();
 }
+
+let caretRaf = null;
+document.addEventListener('selectionchange', () => {
+  if (caretRaf) return;
+  caretRaf = requestAnimationFrame(() => {
+    caretRaf = null;
+    if (document.activeElement === editor) updateCursor();
+  });
+});
+
+editor.addEventListener('input', onEditorInput);
+editor.addEventListener('scroll', syncScroll);
+
+editor.addEventListener('keydown', e => {
+  if (e.isComposing) return;
+  if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    if (e.shiftKey) outdentLine();
+    else document.execCommand('insertText', false, '    ');
+  }
+  if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    // mantém a indentação da linha atual
+    const sel = getSelectionOffsets();
+    const lineStart = sel ? currentText.lastIndexOf('\n', sel.start - 1) + 1 : 0;
+    const indent = sel ? currentText.slice(lineStart, sel.start).match(/^[ \t]*/)[0] : '';
+    if (!document.execCommand('insertLineBreak')) document.execCommand('insertText', false, '\n');
+    if (indent) document.execCommand('insertText', false, indent);
+  }
+});
+
+function outdentLine() {
+  const sel = getSelectionOffsets();
+  if (!sel) return;
+  const lineStart = currentText.lastIndexOf('\n', sel.start - 1) + 1;
+  const m = currentText.slice(lineStart).match(/^( {1,4}|\t)/);
+  if (!m) return;
+  const n = m[0].length;
+  replaceRange(lineStart, lineStart + n, '');
+  setSelectionOffsets(Math.max(lineStart, sel.start - n), Math.max(lineStart, sel.end - n));
+}
+
+// colar sempre como texto puro
+editor.addEventListener('paste', e => {
+  e.preventDefault();
+  const text = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+  if (!text) return;
+  const clean = text.replace(/\r\n?/g, '\n');
+  if (!document.execCommand('insertText', false, clean)) {
+    const sel = getSelectionOffsets() || { start: currentText.length, end: currentText.length };
+    replaceRange(sel.start, sel.end, clean);
+  }
+});
+
+// copiar/recortar: garante texto puro (URLs no lugar dos chips)
+['copy', 'cut'].forEach(type => editor.addEventListener(type, e => {
+  const sel = getSelectionOffsets();
+  if (!sel || sel.start === sel.end || !e.clipboardData) return;
+  e.preventDefault();
+  e.clipboardData.setData('text/plain', sel.text.slice(sel.start, sel.end));
+  if (type === 'cut') document.execCommand('delete');
+}));
 
 // ══════════════════════════════════════════════════
 // LINE NUMBERS
 // ══════════════════════════════════════════════════
+let gutterLines = 0, gutterCurrent = 0;
+
 function updateGutter() {
-  const text    = getEditorText();
-  const total   = (text.match(/\n/g) || []).length + 1;
-  const curLine = getCaretLineCol().line;
-  let html = '';
-  for (let i = 1; i <= total; i++) {
-    html += `<span class="gutter-line${i === curLine ? ' current' : ''}">${i}</span>\n`;
+  const total = U.countLines(currentText);
+  if (total !== gutterLines) {
+    const frag = document.createDocumentFragment();
+    for (let i = 1; i <= total; i++) {
+      const s = document.createElement('span');
+      s.className = 'gutter-line';
+      s.textContent = i;
+      frag.appendChild(s);
+    }
+    gutter.replaceChildren(frag);
+    gutterLines = total;
+    gutterCurrent = 0;
   }
-  gutter.innerHTML = html;
-  gutter.style.fontSize  = getComputedStyle(root).getPropertyValue('--fs').trim();
-  gutter.style.lineHeight = getComputedStyle(root).getPropertyValue('--lh').trim();
+  setGutterCurrent(caret.line);
+  syncScroll();
 }
 
-function highlightCurrentLine() {
-  updateGutter();
+function setGutterCurrent(line) {
+  if (line === gutterCurrent) return;
+  gutter.children[gutterCurrent - 1]?.classList.remove('current');
+  gutter.children[line - 1]?.classList.add('current');
+  gutterCurrent = line;
 }
 
 function syncScroll() {
@@ -285,21 +571,24 @@ function syncScroll() {
   updateMinimap();
 }
 
-editor.addEventListener('scroll', syncScroll);
+function toggleLineNumbers() {
+  saveSetting('lineNumbers', $('lnTgl').checked);
+  document.body.classList.toggle('no-line-numbers', !settings.lineNumbers);
+}
 
 // ══════════════════════════════════════════════════
 // MINIMAP
 // ══════════════════════════════════════════════════
-const minimapEl       = document.getElementById('minimap');
-const minimapCanvas   = document.getElementById('minimapCanvas');
-const minimapViewport = document.getElementById('minimap-viewport');
+const minimapEl       = $('minimap');
+const minimapCanvas   = $('minimapCanvas');
+const minimapViewport = $('minimap-viewport');
 const mmCtx           = minimapCanvas.getContext('2d');
-const MM_SCALE        = 0.18; // how much we shrink the text
+const MM_SCALE        = 0.18; // quanto o texto encolhe
 let mmRaf = null;
 
 function updateMinimap() {
-  if (mmRaf) cancelAnimationFrame(mmRaf);
-  mmRaf = requestAnimationFrame(drawMinimap);
+  if (!settings.minimap || mmRaf) return;
+  mmRaf = requestAnimationFrame(() => { mmRaf = null; drawMinimap(); });
 }
 
 function drawMinimap() {
@@ -307,72 +596,59 @@ function drawMinimap() {
   const H = minimapEl.clientHeight;
   if (W === 0 || H === 0) return;
 
-  minimapCanvas.width  = W;
-  minimapCanvas.height = H;
+  const dpr = window.devicePixelRatio || 1;
+  minimapCanvas.width  = W * dpr;
+  minimapCanvas.height = H * dpr;
+  mmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const style   = getComputedStyle(root);
-  const bgColor = style.getPropertyValue('--bg').trim();
-  const txtColor= style.getPropertyValue('--text').trim();
-  const acColor = style.getPropertyValue('--accent').trim();
+  const color   = name => style.getPropertyValue(name).trim();
+  const txtColor = color('--text'), acColor = color('--accent'), mutedColor = color('--muted');
 
-  // background
-  mmCtx.fillStyle = bgColor;
+  mmCtx.fillStyle = color('--gutter');
   mmCtx.fillRect(0, 0, W, H);
 
-  const lines     = getEditorText().split('\n');
-  const totalLines= lines.length;
-  const fs        = parseFloat(style.getPropertyValue('--fs')) || 15;
-  const lh        = parseFloat(style.getPropertyValue('--lh')) || 1.75;
-  const lineH     = fs * lh;
-  const mmLineH   = Math.max(2, lineH * MM_SCALE);
-  const totalH    = totalLines * mmLineH;
+  const lines   = currentText.split('\n');
+  const fs      = parseFloat(color('--fs')) || 15;
+  const lh      = parseFloat(color('--lh')) || 1.75;
+  const mmLineH = Math.max(2, fs * lh * MM_SCALE);
+  const totalH  = lines.length * mmLineH;
 
-  // where editor currently is
+  // posição atual do editor
   const scrollRatio  = editor.scrollTop / Math.max(1, editor.scrollHeight - editor.clientHeight);
   const visibleRatio = editor.clientHeight / Math.max(1, editor.scrollHeight);
+  const mmOffset     = scrollRatio * Math.max(0, totalH - H);
+  const curLine      = caret.line - 1;
 
-  // offset so minimap scrolls with content when it overflows
-  const mmOffset = scrollRatio * Math.max(0, totalH - H);
+  mmCtx.font = `${Math.max(2, Math.round(fs * MM_SCALE))}px monospace`;
 
-  // current cursor line
-  const curLine = editor.value.slice(0, editor.selectionStart).split('\n').length - 1;
-
-  mmCtx.font = `${Math.round(fs * MM_SCALE)}px monospace`;
-
-  lines.forEach((line, i) => {
+  const first = Math.max(0, Math.floor(mmOffset / mmLineH));
+  const last  = Math.min(lines.length, Math.ceil((mmOffset + H) / mmLineH) + 1);
+  for (let i = first; i < last; i++) {
+    const line = lines[i];
     const y = i * mmLineH - mmOffset;
-    if (y + mmLineH < 0 || y > H) return;
 
-    // highlight current line
     if (i === curLine) {
-      mmCtx.fillStyle = 'rgba(255,255,255,0.06)';
+      mmCtx.globalAlpha = 0.18;
+      mmCtx.fillStyle = acColor;
       mmCtx.fillRect(0, y, W, mmLineH);
     }
-
-    if (!line.trim()) return;
-    // draw text as tiny colored blocks
-    mmCtx.fillStyle = line.startsWith('#') ? acColor :
-                      line.startsWith('//') || line.startsWith('--') ? style.getPropertyValue('--muted').trim() :
-                      txtColor;
+    if (!line.trim()) continue;
+    // títulos (#) e comentários (//, --) com cores próprias
+    mmCtx.fillStyle = line.startsWith('#') ? acColor
+                    : /^\s*(\/\/|--)/.test(line) ? mutedColor : txtColor;
     mmCtx.globalAlpha = 0.7;
     mmCtx.fillText(line.slice(0, 120), 4, y + mmLineH * 0.75);
-    mmCtx.globalAlpha = 1;
-  });
+  }
+  mmCtx.globalAlpha = 1;
 
-  // viewport indicator
-  const vpTop    = scrollRatio * H;
-  const vpHeight = Math.max(20, visibleRatio * H);
-  minimapViewport.style.top    = vpTop + 'px';
-  minimapViewport.style.height = vpHeight + 'px';
+  minimapViewport.style.top    = scrollRatio * (H - Math.max(20, visibleRatio * H)) + 'px';
+  minimapViewport.style.height = Math.max(20, visibleRatio * H) + 'px';
 }
 
-// click/drag on minimap → scroll editor
+// clicar/arrastar no minimap → rola o editor
 let mmDragging = false;
-
-minimapEl.addEventListener('mousedown', e => {
-  mmDragging = true;
-  seekMinimap(e);
-});
+minimapEl.addEventListener('mousedown', e => { e.preventDefault(); mmDragging = true; seekMinimap(e); });
 document.addEventListener('mousemove', e => { if (mmDragging) seekMinimap(e); });
 document.addEventListener('mouseup',   () => { mmDragging = false; });
 
@@ -381,126 +657,66 @@ function seekMinimap(e) {
   const ratio = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
   editor.scrollTop = ratio * (editor.scrollHeight - editor.clientHeight);
   syncScroll();
-  updateCursor();
 }
 
-function toggleLineNumbers() {
-  gutter.style.display = document.getElementById('lnTgl').checked ? '' : 'none';
+// botão "Minimap" / Ctrl+Shift+P
+function togglePreview(force) {
+  saveSetting('minimap', force === undefined ? !settings.minimap : !!force);
+  minimapEl.style.display = settings.minimap ? '' : 'none';
+  $('previewBtn').classList.toggle('active', settings.minimap);
+  updateMinimap();
 }
 
 // ══════════════════════════════════════════════════
 // LINK CHIPS
 // ══════════════════════════════════════════════════
 let linkChipsOn = false;
-const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
 const linkCache = {};
 let chipRenderTimer = null;
 
 function toggleLinkChips() {
-  linkChipsOn = document.getElementById('chipTgl').checked;
-  const text = getEditorText();
-  if (linkChipsOn) {
-    renderChipsFromText(text);
-  } else {
-    // restaura texto puro
-    setEditorText(text);
-  }
+  linkChipsOn = $('chipTgl').checked;
+  saveSetting('chips', linkChipsOn);
+  rerenderEditor();
 }
 
 function scheduleChipRender() {
-  // debounce: espera parar de digitar 600ms antes de converter links em chips
+  // espera parar de digitar antes de converter links em chips
   clearTimeout(chipRenderTimer);
-  chipRenderTimer = setTimeout(() => {
-    if (!linkChipsOn) return;
-    const text = getEditorText();
-    renderChipsFromText(text);
-  }, 600);
+  chipRenderTimer = setTimeout(renderPendingChips, 600);
 }
 
-function renderChipsFromText(text) {
-  // Salva posição do caret para restaurar depois
-  const sel = window.getSelection();
-  const hadFocus = document.activeElement === editor;
-
-  // Reconstrói o innerHTML do editor com chips no lugar das URLs
-  const matches = [...text.matchAll(URL_RE)];
-  if (!matches.length) {
-    // nenhuma URL — só texto puro
-    editor.innerHTML = '';
-    insertTextNodes(editor, text);
-    if (hadFocus) editor.focus();
-    return;
-  }
-
-  const frag = document.createDocumentFragment();
-  let cursor = 0;
-
-  matches.forEach(m => {
-    // texto antes da URL
-    const before = text.slice(cursor, m.index);
-    if (before) insertTextNodes(frag, before);
-
-    // chip
-    const url = m[0];
-    frag.appendChild(buildChipNode(url, linkCache[url]));
-    cursor = m.index + url.length;
-
-    // fetch título se não cacheado
-    if (!linkCache[url]) fetchLinkMeta(url);
-  });
-
-  // texto após última URL
-  const after = text.slice(cursor);
-  if (after) insertTextNodes(frag, after);
-
-  editor.innerHTML = '';
-  editor.appendChild(frag);
-
-  // move caret para o fim
-  if (hadFocus) {
-    editor.focus();
-    const r = document.createRange();
-    r.selectNodeContents(editor);
-    r.collapse(false);
-    sel.removeAllRanges();
-    sel.addRange(r);
-  }
+function renderPendingChips() {
+  if (!linkChipsOn) return;
+  const sel = getSelectionOffsets();
+  const { text, pieces } = serializeEditor();
+  const chips = pieces.filter(p => p.kind === 'chip').map(p => p.start + ' ' + p.node.dataset.url);
+  const chipStarts = new Set(pieces.filter(p => p.kind === 'chip').map(p => p.start));
+  // URL que o cursor ainda está digitando continua como texto
+  const urls = U.findUrls(text).filter(u => chipStarts.has(u.index) || !sel ||
+    sel.end < u.index || sel.end > u.index + u.url.length);
+  const wanted = urls.map(u => u.index + ' ' + u.url);
+  if (wanted.join('\n') === chips.join('\n')) return;
+  currentText = text;
+  rerenderEditor(urls);
 }
 
-function insertTextNodes(parent, text) {
-  // split by \n and insert text + <br> nodes
-  const lines = text.split('\n');
-  lines.forEach((line, i) => {
-    if (line) parent.appendChild(document.createTextNode(line));
-    if (i < lines.length - 1) parent.appendChild(document.createElement('br'));
-  });
-}
-
-function buildChipNode(url, meta) {
-  const domain  = domainOf(url);
-  const title   = meta?.title || domain;
+function buildChipNode(url) {
+  const meta   = linkCache[url];
+  const domain = U.domainOf(url);
   const a = document.createElement('a');
   a.className   = 'link-chip';
   a.href        = url;
   a.dataset.url = url;
   a.target      = '_blank';
-  a.rel         = 'noopener';
+  a.rel         = 'noopener noreferrer';
   a.contentEditable = 'false'; // chip é atômico — não editável por dentro
 
-  // favicon
-  if (meta?.favicon) {
-    const img = document.createElement('img');
-    img.src = meta.favicon;
-    img.style.cssText = 'width:12px;height:12px;border-radius:2px;object-fit:contain;';
-    img.onerror = () => img.replaceWith(chipIconSpan());
-    a.appendChild(img);
-  } else {
-    a.appendChild(chipIconSpan());
-  }
+  a.appendChild(meta?.favicon ? faviconImg(meta.favicon) : chipIconSpan());
 
   const tSpan = document.createElement('span');
   tSpan.className = 'chip-title';
-  tSpan.textContent = title;
+  tSpan.textContent = meta?.title || domain;
   a.appendChild(tSpan);
 
   const dSpan = document.createElement('span');
@@ -508,10 +724,17 @@ function buildChipNode(url, meta) {
   dSpan.textContent = domain;
   a.appendChild(dSpan);
 
-  // clique abre link sem interferir no editor
-  a.addEventListener('click', e => { e.preventDefault(); window.open(url, '_blank'); });
-
+  a.addEventListener('click', e => { e.preventDefault(); window.open(url, '_blank', 'noopener'); });
   return a;
+}
+
+function faviconImg(src) {
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = '';
+  img.className = 'chip-favicon';
+  img.onerror = () => img.replaceWith(chipIconSpan());
+  return img;
 }
 
 function chipIconSpan() {
@@ -521,298 +744,473 @@ function chipIconSpan() {
   return s;
 }
 
-function domainOf(url) {
-  try {
-    const u = new URL(url);
-    return u.hostname.replace(/^www\./, '');
-  } catch { return url.slice(0, 20); }
+function chipsFor(url) {
+  return editor.querySelectorAll(`.link-chip[data-url="${CSS.escape(url)}"]`);
 }
 
 async function fetchLinkMeta(url) {
-  linkCache[url] = { title: domainOf(url), favicon: faviconUrl(url) };
-  // mostra domínio imediatamente nos chips já no DOM
-  editor.querySelectorAll(`.link-chip[data-url="${CSS.escape(url)}"]`).forEach(chip => {
-    const tSpan = chip.querySelector('.chip-title');
-    if (tSpan) tSpan.textContent = domainOf(url);
-  });
+  const domain = U.domainOf(url);
+  linkCache[url] = { title: domain, favicon: TEST_MODE ? null : U.faviconUrl(url) };
+  if (TEST_MODE) return;
 
   try {
+    // títulos de páginas externas exigem um proxy CORS (o link é enviado a allorigins.win)
     const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const res   = await fetch(proxy, { signal: AbortSignal.timeout(6000) });
-    const json  = await res.json();
-    const html  = json.contents || '';
-
-    const titleMatch = html.match(/<title[^>]*>([^<]{1,120})<\/title>/i);
-    const ogMatch    = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']{1,120})["']/i)
-                    || html.match(/<meta[^>]+content=["']([^"']{1,120})["'][^>]+property=["']og:title["']/i);
-
-    const title = (ogMatch?.[1] || titleMatch?.[1] || domainOf(url))
-      .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,"'").replace(/&quot;/g,'"').trim();
-
-    linkCache[url] = { title, favicon: faviconUrl(url) };
-    // atualiza chips existentes no DOM sem reescrever tudo
-    editor.querySelectorAll(`.link-chip[data-url="${CSS.escape(url)}"]`).forEach(chip => {
-      const tSpan = chip.querySelector('.chip-title');
-      if (tSpan) tSpan.textContent = title;
-      const favicon = chip.querySelector('img') || chip.querySelector('.chip-icon');
-      if (favicon && faviconUrl(url)) {
-        const img = document.createElement('img');
-        img.src = faviconUrl(url);
-        img.style.cssText = 'width:12px;height:12px;border-radius:2px;object-fit:contain;';
-        img.onerror = () => img.replaceWith(chipIconSpan());
-        favicon.replaceWith(img);
-      }
-    });
+    const opts  = typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(6000) } : {};
+    const json  = await (await fetch(proxy, opts)).json();
+    linkCache[url].title = U.extractTitle(json.contents || '', domain);
   } catch {
-    // mantém domínio como fallback
+    // mantém o domínio como fallback
   }
-}
 
-function faviconUrl(url) {
-  try {
-    const u = new URL(url);
-    return `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=32`;
-  } catch { return null; }
-}
-
-// ══════════════════════════════════════════════════
-// MINIMAP TOGGLE (botão "Preview MD" / Ctrl+Shift+P)
-// ══════════════════════════════════════════════════
-function togglePreview() {
-  previewOn = !previewOn;
-  minimapEl.style.display = previewOn ? '' : 'none';
-  document.getElementById('previewBtn').classList.toggle('active', previewOn);
-  if (previewOn) updateMinimap();
-}
-
-function updatePreview() {
-  // mantido por compatibilidade com chamadas existentes — não faz nada
-}
-
-function simpleMarkdown(md) {
-  let html = escHtml(md);
-  // fenced code blocks
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre><code class="lang-${lang}">${code}</code></pre>`);
-  // inline code
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // headings
-  html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
-  html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
-  html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // hr
-  html = html.replace(/^---+$/gm, '<hr>');
-  // bold + italic
-  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
-  html = html.replace(/_(.+?)_/g, '<em>$1</em>');
-  // strikethrough
-  html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
-  // links + images
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1">');
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-  // blockquote
-  html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  // unordered lists
-  html = html.replace(/(^[*\-+] .+(\n[*\-+] .+)*)/gm, m => {
-    const items = m.split('\n').map(l => `<li>${l.replace(/^[*\-+] /, '')}</li>`).join('');
-    return `<ul>${items}</ul>`;
+  chipsFor(url).forEach(chip => {
+    const tSpan = chip.querySelector('.chip-title');
+    if (tSpan) tSpan.textContent = linkCache[url].title;
+    const icon = chip.querySelector('.chip-icon');
+    if (icon && linkCache[url].favicon) icon.replaceWith(faviconImg(linkCache[url].favicon));
   });
-  // ordered lists
-  html = html.replace(/(^\d+\. .+(\n\d+\. .+)*)/gm, m => {
-    const items = m.split('\n').map(l => `<li>${l.replace(/^\d+\. /, '')}</li>`).join('');
-    return `<ol>${items}</ol>`;
-  });
-  // tables
-  html = html.replace(/(\|.+\|\n\|[-| :]+\|\n(?:\|.+\|\n?)+)/g, m => {
-    const rows = m.trim().split('\n');
-    const header = rows[0].split('|').filter(c=>c.trim()).map(c=>`<th>${c.trim()}</th>`).join('');
-    const body = rows.slice(2).map(r =>
-      '<tr>'+r.split('|').filter(c=>c.trim()).map(c=>`<td>${c.trim()}</td>`).join('')+'</tr>'
-    ).join('');
-    return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
-  });
-  // paragraphs
-  html = html.replace(/\n{2,}/g, '</p><p>');
-  html = '<p>' + html + '</p>';
-  html = html.replace(/<p>\s*(<(?:h[1-6]|pre|ul|ol|blockquote|hr|table)[^>]*>)/g, '$1');
-  html = html.replace(/(<\/(?:h[1-6]|pre|ul|ol|blockquote|hr|table)>)\s*<\/p>/g, '$1');
-  // line breaks
-  html = html.replace(/\n/g, '<br>');
-  return html;
 }
 
 // ══════════════════════════════════════════════════
 // FILE OPS
 // ══════════════════════════════════════════════════
-function openFile() { document.getElementById('fileInput').click(); }
+const FILE_EXTS  = ['.txt', '.md', '.log', '.csv', '.json', '.xml', '.html', '.js', '.css',
+                    '.py', '.ts', '.jsx', '.tsx', '.sh', '.yaml', '.yml', '.ini', '.cfg'];
+const FILE_TYPES = [{ description: 'Arquivos de texto', accept: { 'text/plain': FILE_EXTS } }];
 
-function handleOpen(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    const tab = newTab(file.name, ev.target.result);
-    tab.dirty = false;
-    setDirty(false);
-    addRecent(file.name);
-    updateStats();
-    updateGutter();
-  };
-  reader.readAsText(file);
-  e.target.value = '';
+$('fileInput').accept = FILE_EXTS.join(',');
+
+async function openFile() {
+  // File System Access API (Chrome/Edge): permite salvar de volta no mesmo arquivo
+  if (typeof window.showOpenFilePicker !== 'function') { $('fileInput').click(); return; }
+  try {
+    const handles = await window.showOpenFilePicker({ multiple: true, types: FILE_TYPES });
+    for (const h of handles) await openFromFile(await h.getFile(), h);
+  } catch (err) {
+    if (err.name !== 'AbortError') notify('Não foi possível abrir: ' + err.message);
+  }
 }
 
-function saveFile() {
-  if (!activeTab) return;
-  const content = getEditorText();
-  activeTab.content = content;
-  const name = activeTab.name.endsWith('.txt') || activeTab.name.includes('.')
-    ? activeTab.name : activeTab.name + '.txt';
-  const blob = new Blob([content], { type:'text/plain;charset=utf-8' });
+async function handleOpen(e) {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const f of files) await openFromFile(f);
+}
+
+async function openFromFile(file, handle) {
+  if (file.size > BIG_FILE_BYTES &&
+      !confirm(`"${file.name}" tem ${(file.size / 1048576).toFixed(1)} MB e pode deixar o editor lento. Abrir mesmo assim?`)) return null;
+
+  const raw = await file.text();
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  const content = raw.replace(/\r\n?/g, '\n');
+
+  // arquivo já aberto pelo mesmo handle → troca para a aba (e recarrega se não houver edições)
+  if (handle) {
+    for (const t of tabs) {
+      if (!t.handle || !(await t.handle.isSameEntry(handle))) continue;
+      t.handle = handle;
+      if (!t.dirty) Object.assign(t, { content, eol });
+      if (activeTab === t) activeTab = null; // força recarregar o editor
+      switchTab(t.id);
+      if (t.dirty) notify(`"${t.name}" tem alterações não salvas — mantida a sua versão`);
+      persistHandles();
+      return t;
+    }
+  }
+
+  // reaproveita a aba atual se ela for uma aba nova, vazia e intocada
+  const blank = activeTab && !activeTab.dirty && !activeTab.handle &&
+                activeTab.content === '' && activeTab.name === 'Sem título' ? activeTab : null;
+  const tab = newTab(file.name, content, { eol, handle: handle || null });
+  if (blank) { tabs = tabs.filter(t => t !== blank); renderTabs(); }
+
+  addRecent(file.name, content);
+  schedulePersist();
+  return tab;
+}
+
+function toDisk(text, eol) { return eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text; }
+
+async function writeHandle(handle, content) {
+  // handles restaurados do IndexedDB precisam de nova permissão de escrita
+  if (typeof handle.queryPermission === 'function') {
+    const mode = { mode: 'readwrite' };
+    if (await handle.queryPermission(mode) !== 'granted' &&
+        await handle.requestPermission(mode) !== 'granted') {
+      throw Object.assign(new Error('permissão de escrita negada'), { name: 'NotAllowedError' });
+    }
+  }
+  const w = await handle.createWritable();
+  await w.write(content);
+  await w.close();
+}
+
+function downloadText(name, content) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
   a.click();
-  URL.revokeObjectURL(a.href);
-  setDirty(false);
-  addRecent(name);
-  notify('Arquivo salvo!');
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-function saveAs() {
-  const name = prompt('Nome do arquivo:', activeTab ? activeTab.name : 'nota');
-  if (name === null) return;
-  if (activeTab) activeTab.name = name;
-  saveFile();
+async function saveFile(asNew) {
+  if (!activeTab) return false;
+  const tab  = activeTab;
+  const text = currentText;
+  const data = toDisk(text, tab.eol);
+
+  try {
+    if (!asNew && tab.handle) {
+      await writeHandle(tab.handle, data);
+    } else if (typeof window.showSaveFilePicker === 'function') {
+      const h = await window.showSaveFilePicker({ suggestedName: U.ensureExtension(tab.name), types: FILE_TYPES });
+      await writeHandle(h, data);
+      tab.handle = h;
+      tab.name   = h.name;
+    } else {
+      // sem acesso ao disco: baixa o arquivo
+      let name = tab.name;
+      if (asNew) {
+        name = prompt('Nome do arquivo:', U.ensureExtension(tab.name));
+        if (name === null) return false;
+      }
+      tab.name = U.ensureExtension(name);
+      downloadText(tab.name, data);
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') notify('Erro ao salvar: ' + err.message);
+    return false;
+  }
+
+  tab.content = tab === activeTab ? currentText : tab.content;
+  if (tab.content === text) tab.dirty = false;
+  renderTabs();
+  updateStatusFile();
+  addRecent(tab.name, text);
+  persistSession();
+  notify(`"${tab.name}" salvo!`);
+  return true;
 }
+
+function saveAs() { return saveFile(true); }
+
+// arrastar arquivos para a janela abre em novas abas
+const hasFiles = e => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+document.addEventListener('dragover', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  document.body.classList.add('drop-target');
+});
+document.addEventListener('dragleave', e => {
+  if (!e.relatedTarget) document.body.classList.remove('drop-target');
+});
+document.addEventListener('drop', async e => {
+  document.body.classList.remove('drop-target');
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  for (const f of [...e.dataTransfer.files]) await openFromFile(f);
+});
 
 // ══════════════════════════════════════════════════
 // RECENT FILES
 // ══════════════════════════════════════════════════
-function addRecent(name) {
-  recentFiles = [name, ...recentFiles.filter(n => n !== name)].slice(0, 10);
-  try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentFiles)); } catch {}
+// formato antigo: lista de nomes; formato novo: { name, content, at }
+let recentFiles = loadJSON(RECENT_KEY, [])
+  .map(r => typeof r === 'string' ? { name: r, content: null, at: 0 } : r)
+  .filter(r => r && r.name);
+
+function addRecent(name, content) {
+  const entry = { name, content: content.length <= RECENT_MAX_CHARS ? content : null, at: Date.now() };
+  recentFiles = [entry, ...recentFiles.filter(r => r.name !== name)].slice(0, 10);
+  if (!saveJSON(RECENT_KEY, recentFiles)) {
+    // sem espaço: guarda só os nomes
+    saveJSON(RECENT_KEY, recentFiles.map(r => ({ name: r.name, content: null, at: r.at })));
+  }
 }
 
 function toggleRecent() {
-  const drop = document.getElementById('recentDrop');
+  const drop = $('recentDrop');
   drop.classList.toggle('show');
+  $('recentBtn').setAttribute('aria-expanded', drop.classList.contains('show'));
   if (drop.classList.contains('show')) renderRecent();
 }
 
-function renderRecent() {
-  const drop = document.getElementById('recentDrop');
-  if (recentFiles.length === 0) {
-    drop.innerHTML = '<div class="recent-empty">Nenhum arquivo recente</div>';
-    return;
-  }
-  drop.innerHTML = recentFiles.map(n =>
-    `<div class="recent-item" onclick="openRecent('${escHtml(n)}')">${escHtml(n)}<span>abrir</span></div>`
-  ).join('');
+function formatDate(ts) {
+  return ts ? new Date(ts).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }) : '';
 }
 
-function openRecent(name) {
-  document.getElementById('recentDrop').classList.remove('show');
-  notify(`"${name}" foi aberto anteriormente nesta sessão. Use Abrir para carregar o arquivo.`);
+function renderRecent() {
+  const drop = $('recentDrop');
+  drop.replaceChildren();
+  if (recentFiles.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'recent-empty';
+    empty.textContent = 'Nenhum arquivo recente';
+    drop.appendChild(empty);
+    return;
+  }
+  recentFiles.forEach((r, i) => {
+    const item = document.createElement('button');
+    item.className = 'recent-item';
+    item.disabled = r.content === null;
+    const name = document.createElement('b');
+    name.textContent = r.name;
+    const meta = document.createElement('span');
+    meta.textContent = r.content === null ? 'sem cópia' : formatDate(r.at);
+    item.append(name, meta);
+    item.title = r.content === null ? 'Conteúdo grande demais para guardar — use Abrir' : 'Reabrir a última versão guardada';
+    item.addEventListener('click', () => openRecent(i));
+    drop.appendChild(item);
+  });
+  const clear = document.createElement('button');
+  clear.className = 'recent-clear';
+  clear.textContent = 'Limpar lista';
+  clear.addEventListener('click', () => { recentFiles = []; saveJSON(RECENT_KEY, []); renderRecent(); });
+  drop.appendChild(clear);
+}
+
+function openRecent(i) {
+  const r = recentFiles[i];
+  $('recentDrop').classList.remove('show');
+  if (!r || r.content === null) return;
+  const open = tabs.find(t => t.name === r.name && t.content === r.content);
+  if (open) { switchTab(open.id); return; }
+  newTab(r.name, r.content);
+  notify(`"${r.name}" — versão de ${formatDate(r.at)}`);
 }
 
 document.addEventListener('click', e => {
-  if (!e.target.closest('.dropdown-wrap')) {
-    document.getElementById('recentDrop').classList.remove('show');
-  }
+  if (!e.target.closest('.dropdown-wrap')) $('recentDrop').classList.remove('show');
 });
 
 // ══════════════════════════════════════════════════
-// AUTO-SAVE
+// SESSION (abas restauradas ao reabrir)
 // ══════════════════════════════════════════════════
-function toggleAutoSave() {
-  autoSaveOn = document.getElementById('autoSaveTgl').checked;
-  if (!autoSaveOn && autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+let persistTimer = null;
+let sessionWarned = false;
+
+function schedulePersist() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(persistSession, 400);
 }
 
-function scheduleAutoSave() {
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer = setTimeout(() => { saveFile(); notify('Auto-salvo!'); }, 5000);
+function persistSession() {
+  clearTimeout(persistTimer);
+  if (!settings.session || !activeTab) return;
+  activeTab.content = currentText;
+  const data = {
+    v: 1,
+    active: tabs.indexOf(activeTab),
+    tabs: tabs.map(t => ({ uid: t.uid, name: t.name, content: t.content, dirty: t.dirty, eol: t.eol })),
+  };
+  if (!saveJSON(SESSION_KEY, data) && !sessionWarned) {
+    sessionWarned = true;
+    notify('Sessão grande demais para guardar no navegador.');
+  }
+  persistHandles();
 }
+
+function restoreSession() {
+  const data = settings.session ? loadJSON(SESSION_KEY, null) : null;
+  if (!data || !Array.isArray(data.tabs) || !data.tabs.length) return false;
+  data.tabs.forEach(t => tabs.push(makeTab(t.name, String(t.content || ''), Object.assign({
+    dirty: !!t.dirty,
+    eol: t.eol === '\r\n' ? '\r\n' : '\n',
+  }, t.uid ? { uid: String(t.uid) } : {}))));
+  switchTab((tabs[data.active] || tabs[0]).id);
+  return true;
+}
+
+function toggleSession() {
+  saveSetting('session', $('sessionTgl').checked);
+  if (settings.session) persistSession();
+  else {
+    try { localStorage.removeItem(SESSION_KEY); } catch {}
+    handleStore('readwrite', s => s.clear());
+    lastHandleSig = '';
+  }
+}
+
+// ── vínculo aba ⇄ arquivo ────────────────────────
+// FileSystemFileHandle não cabe no localStorage: fica no IndexedDB, por aba (uid),
+// para que Ctrl+S continue gravando no mesmo arquivo depois de reabrir o app.
+const HANDLE_DB = STORE + 'blocoHandles';
+let handleDbPromise = null;
+let lastHandleSig = '';
+
+function handleStore(mode, fn) {
+  if (!('indexedDB' in window)) return Promise.resolve(null);
+  handleDbPromise = handleDbPromise || new Promise(resolve => {
+    const req = indexedDB.open(HANDLE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles', { keyPath: 'uid' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+  return handleDbPromise.then(db => db && new Promise(resolve => {
+    const tx = db.transaction('handles', mode);
+    let req = null;
+    tx.oncomplete = () => resolve(req ? req.result : null);
+    tx.onerror = tx.onabort = () => resolve(null);
+    try { req = fn(tx.objectStore('handles')); }
+    catch { tx.abort(); } // ex.: objeto que não pode ser clonado
+  }));
+}
+
+function persistHandles() {
+  if (!settings.session) return;
+  const linked = tabs.filter(t => t.handle);
+  const sig = linked.map(t => t.uid + ':' + t.handle.name).join('|');
+  if (sig === lastHandleSig) return; // nada mudou
+  lastHandleSig = sig;
+  handleStore('readwrite', s => {
+    s.clear();
+    linked.forEach(t => s.put({ uid: t.uid, handle: t.handle }));
+  });
+}
+
+async function restoreHandles() {
+  if (!settings.session) return;
+  const rows = (await handleStore('readonly', s => s.getAll())) || [];
+  rows.forEach(({ uid, handle }) => {
+    const tab = tabs.find(t => t.uid === uid);
+    if (tab && !tab.handle) tab.handle = handle;
+  });
+  lastHandleSig = tabs.filter(t => t.handle).map(t => t.uid + ':' + t.handle.name).join('|');
+}
+
+window.addEventListener('beforeunload', e => {
+  persistSession();
+  if (!settings.session && tabs.some(t => t.dirty)) { e.preventDefault(); e.returnValue = ''; }
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden) persistSession(); });
 
 // ══════════════════════════════════════════════════
 // FIND & REPLACE
 // ══════════════════════════════════════════════════
-function toggleFind() {
-  const bar = document.getElementById('findbar');
-  bar.classList.toggle('show');
-  if (bar.classList.contains('show')) document.getElementById('findInput').focus();
-  else { findMatches = []; document.getElementById('matchInfo').textContent = ''; }
+const HAS_HIGHLIGHTS = typeof CSS !== 'undefined' && !!CSS.highlights && typeof Highlight === 'function';
+
+function findOpen() { return $('findbar').classList.contains('show'); }
+
+function toggleFind(force, focusReplace) {
+  const show = force === undefined ? !findOpen() : !!force;
+  $('findbar').classList.toggle('show', show);
+  if (show) {
+    const sel = getSelectionOffsets();
+    const picked = sel ? sel.text.slice(sel.start, sel.end) : '';
+    if (picked && !picked.includes('\n')) $('findInput').value = picked;
+    const input = focusReplace ? $('replaceInput') : $('findInput');
+    input.focus();
+    input.select();
+    doFind();
+  } else {
+    findMatches = [];
+    $('matchInfo').textContent = '';
+    clearHighlights();
+    editor.focus({ preventScroll: true });
+  }
 }
 
 function findKey(e) {
-  if (e.key === 'Enter') { e.shiftKey ? prevMatch() : nextMatch(); }
-  if (e.key === 'Escape') toggleFind();
+  if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? prevMatch() : nextMatch(); }
+  if (e.key === 'Escape') toggleFind(false);
 }
 
-function doFind() {
-  const q = document.getElementById('findInput').value;
-  const info = document.getElementById('matchInfo');
-  if (!q) { findMatches = []; info.textContent = ''; return; }
-  const cs = document.getElementById('caseCk').checked;
-  const wb = document.getElementById('wordCk').checked;
-  const flags = cs ? 'g' : 'gi';
-  const pat = wb ? `\\b${escRe(q)}\\b` : escRe(q);
+function replaceKey(e) {
+  if (e.key === 'Enter') { e.preventDefault(); e.ctrlKey || e.metaKey ? doReplaceAll() : doReplace(); }
+  if (e.key === 'Escape') toggleFind(false);
+}
+
+function searchRegex() {
   try {
-    findMatches = [...getEditorText().matchAll(new RegExp(pat, flags))];
-    info.textContent = findMatches.length + (findMatches.length === 1 ? ' result' : ' results');
-    findIdx = 0;
-    if (findMatches.length) selectMatch(0);
-  } catch {}
+    return U.buildSearchRegex($('findInput').value, {
+      caseSensitive: $('caseCk').checked,
+      wholeWord: $('wordCk').checked,
+    });
+  } catch { return null; }
+}
+
+// keep=true: recalcula mantendo o resultado atual (usado durante a digitação)
+function doFind(keep) {
+  findMatches = U.findAll(currentText, searchRegex());
+  if (keep) {
+    findIdx = Math.min(findIdx, Math.max(0, findMatches.length - 1));
+  } else {
+    const i = findMatches.findIndex(m => m.index >= caret.start);
+    findIdx = i === -1 ? 0 : i;
+  }
+  paintMatches();
+  if (!keep && findMatches.length) revealMatch();
+}
+
+function paintMatches() {
+  const q = $('findInput').value;
+  $('matchInfo').textContent = !q ? '' : !findMatches.length ? 'Nenhum resultado'
+                             : `${findIdx + 1} de ${findMatches.length}`;
+  $('findbar').classList.toggle('no-match', !!q && !findMatches.length);
+  if (!HAS_HIGHLIGHTS) return;
+  const { pieces } = serializeEditor();
+  const all = new Highlight(), current = new Highlight();
+  findMatches.forEach((m, i) => (i === findIdx ? current : all)
+    .add(rangeFromOffsets(m.index, m.index + m.length, pieces)));
+  CSS.highlights.set('find-match', all);
+  CSS.highlights.set('find-current', current);
+}
+
+function clearHighlights() {
+  if (!HAS_HIGHLIGHTS) return;
+  CSS.highlights.delete('find-match');
+  CSS.highlights.delete('find-current');
+}
+
+function revealMatch() {
+  const m = findMatches[findIdx];
+  if (!m) return;
+  const range = rangeFromOffsets(m.index, m.index + m.length);
+  const r = range.getBoundingClientRect();
+  const box = editor.getBoundingClientRect();
+  if (r.top < box.top + 20 || r.bottom > box.bottom - 20) editor.scrollTop += r.top - box.top - editor.clientHeight / 3;
+  if (r.left < box.left + 20 || r.right > box.right - 20) editor.scrollLeft += r.left - box.left - editor.clientWidth / 3;
+  // sem Highlight API: seleciona o trecho para ele aparecer
+  if (!HAS_HIGHLIGHTS) { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); }
 }
 
 function selectMatch(i) {
   if (!findMatches.length) return;
   findIdx = ((i % findMatches.length) + findMatches.length) % findMatches.length;
-  document.getElementById('matchInfo').textContent = (findIdx+1) + ' / ' + findMatches.length;
-  // highlight via window.find (best effort in contenteditable)
-  editor.focus();
-  const m = findMatches[findIdx];
-  const text = getEditorText();
-  notify(`Resultado ${findIdx+1} de ${findMatches.length}`);
+  paintMatches();
+  revealMatch();
 }
 
 function nextMatch() { selectMatch(findIdx + 1); }
 function prevMatch() { selectMatch(findIdx - 1); }
 
 function doReplace() {
-  const rep = document.getElementById('replaceInput').value;
-  if (!findMatches.length) return;
   const m = findMatches[findIdx];
-  const text = getEditorText();
-  const newText = text.slice(0, m.index) + rep + text.slice(m.index + m[0].length);
-  setEditorText(newText);
-  if (activeTab) activeTab.content = newText;
-  setDirty(true);
-  doFind();
+  if (!m) return;
+  const rep = $('replaceInput').value;
+  const focused = document.activeElement;
+  replaceRange(m.index, m.index + m.length, rep);
+  // continua do próximo resultado após o texto inserido
+  findMatches = U.findAll(currentText, searchRegex());
+  const next = findMatches.findIndex(x => x.index >= m.index + rep.length);
+  findIdx = next === -1 ? 0 : next;
+  paintMatches();
+  revealMatch();
+  if (focused && focused !== editor) focused.focus();
 }
 
 function doReplaceAll() {
-  const q = document.getElementById('findInput').value;
-  const rep = document.getElementById('replaceInput').value;
-  if (!q) return;
-  const cs = document.getElementById('caseCk').checked;
-  const wb = document.getElementById('wordCk').checked;
-  const flags = cs ? 'g' : 'gi';
-  const pat = wb ? `\\b${escRe(q)}\\b` : escRe(q);
-  try {
-    const newText = getEditorText().replace(new RegExp(pat, flags), rep);
-    setEditorText(newText);
-    if (activeTab) activeTab.content = newText;
-    setDirty(true);
-    doFind();
-  } catch {}
+  const re = searchRegex();
+  const count = U.findAll(currentText, re).length;
+  if (!count) return;
+  const newText = U.replaceAllLiteral(currentText, re, $('replaceInput').value);
+  const focused = document.activeElement;
+  replaceRange(0, currentText.length, newText); // um único passo de desfazer
+  doFind(true);
+  if (focused && focused !== editor) focused.focus();
+  notify(count === 1 ? '1 substituição' : `${count} substituições`);
 }
 
 // ══════════════════════════════════════════════════
@@ -821,49 +1219,56 @@ function doReplaceAll() {
 function toggleFocus() {
   focusOn = !focusOn;
   document.body.classList.toggle('focus-mode', focusOn);
-  document.getElementById('focusBtn').classList.toggle('active', focusOn);
+  $('focusBtn').classList.toggle('active', focusOn);
+  updateMinimap();
 }
 
 // ══════════════════════════════════════════════════
 // FONT / SIZE / WRAP
 // ══════════════════════════════════════════════════
-function applyFont() { setVar('--font', document.getElementById('fontSel').value); updateGutter(); }
+function applyFont() {
+  saveSetting('font', $('fontSel').value);
+  setVar('--font', settings.font);
+  updateMinimap();
+}
 
 function applyFontSize(v) {
-  document.getElementById('fsVal').textContent = v;
+  v = Math.min(28, Math.max(11, Number(v) || DEFAULT_SETTINGS.fs));
+  $('fsRange').value = v;
+  $('fsVal').textContent = v;
   setVar('--fs', v + 'px');
-  setTimeout(updateGutter, 50);
+  saveSetting('fs', v);
+  updateMinimap();
 }
 
 function applyLineHeight(v) {
-  const lh = (v / 10).toFixed(2);
-  document.getElementById('lhVal').textContent = lh;
+  const lh = Math.min(3, Math.max(1.2, Number(v) / 100 || DEFAULT_SETTINGS.lh));
+  $('lhRange').value = Math.round(lh * 100);
+  $('lhVal').textContent = lh.toFixed(2);
   setVar('--lh', lh);
-  setTimeout(updateGutter, 50);
+  saveSetting('lh', lh);
+  updateMinimap();
 }
 
-function changeFontSize(d) {
-  const r = document.getElementById('fsRange');
-  r.value = Math.min(28, Math.max(11, +r.value + d));
-  applyFontSize(r.value);
-}
+function changeFontSize(d) { applyFontSize(Number($('fsRange').value) + d); }
 
 function toggleWrap() {
-  const on = document.getElementById('wrapTgl').checked;
-  editor.style.whiteSpace = on ? 'pre-wrap' : 'pre';
-  editor.style.wordWrap   = on ? 'break-word' : 'normal';
-  document.body.classList.toggle('wrap-on', on);
+  saveSetting('wrap', $('wrapTgl').checked);
+  document.body.classList.toggle('wrap-on', settings.wrap);
+  updateMinimap();
 }
 
 function toggleSpell() {
-  editor.spellcheck = document.getElementById('spellTgl').checked;
+  saveSetting('spell', $('spellTgl').checked);
+  editor.spellcheck = settings.spell;
 }
 
 // ══════════════════════════════════════════════════
 // SETTINGS PANEL
 // ══════════════════════════════════════════════════
-function toggleSettings() {
-  document.getElementById('settings').classList.toggle('open');
+function toggleSettings(force) {
+  const panel = $('settings');
+  panel.classList.toggle('open', force === undefined ? !panel.classList.contains('open') : !!force);
 }
 
 function setVar(v, val) { root.style.setProperty(v, val); }
@@ -874,41 +1279,51 @@ function setVar(v, val) { root.style.setProperty(v, val); }
 const THEMES = [
   { name:'Noite Azul', bg:'#1a1a2e', surface:'#16213e', bar:'#0f3460', gutter:'#0d2040', text:'#e0e0e0', muted:'#7a8aaa', accent:'#e94560', border:'#2a3a5a', ln:'#4a6080' },
   { name:'Floresta',   bg:'#1b2b1e', surface:'#152318', bar:'#0d1f10', gutter:'#111a12', text:'#c8e6c9', muted:'#6a916e', accent:'#69f0ae', border:'#2a4a2e', ln:'#3a6040' },
-  { name:'Carvão',     bg:'#1c1c1c', surface:'#242424', bar:'#2c2c2c', gutter:'#181818', text:'#d4d4d4', muted:'#666',    accent:'#d97706', border:'#383838', ln:'#484848' },
+  { name:'Carvão',     bg:'#1c1c1c', surface:'#242424', bar:'#2c2c2c', gutter:'#181818', text:'#d4d4d4', muted:'#888888', accent:'#d97706', border:'#383838', ln:'#5a5a5a' },
   { name:'Lavanda',    bg:'#1e1b2e', surface:'#2a2540', bar:'#332d4f', gutter:'#191626', text:'#e8e0ff', muted:'#8878bb', accent:'#bf87ff', border:'#3a3358', ln:'#4a3a70' },
-  { name:'Papel',      bg:'#f5f0e8', surface:'#ece7da', bar:'#ddd6c8', gutter:'#e8e2d8', text:'#2c2416', muted:'#8a7a60', accent:'#b5451b', border:'#cec7ba', ln:'#a89878' },
-  { name:'Neve',       bg:'#f0f4f8', surface:'#e2eaf2', bar:'#d0dce8', gutter:'#e8eef4', text:'#1a2634', muted:'#6688aa', accent:'#1d7dd4', border:'#c0cdd8', ln:'#8aaac8' },
-  { name:'Terminal',   bg:'#0d0d0d', surface:'#111',    bar:'#0a0a0a', gutter:'#080808', text:'#00ff41', muted:'#006614', accent:'#00ff41', border:'#002200', ln:'#004d18' },
+  { name:'Papel',      bg:'#f5f0e8', surface:'#ece7da', bar:'#ddd6c8', gutter:'#e8e2d8', text:'#2c2416', muted:'#7a6a50', accent:'#b5451b', border:'#cec7ba', ln:'#a89878' },
+  { name:'Neve',       bg:'#f0f4f8', surface:'#e2eaf2', bar:'#d0dce8', gutter:'#e8eef4', text:'#1a2634', muted:'#557799', accent:'#1d7dd4', border:'#c0cdd8', ln:'#8aaac8' },
+  { name:'Terminal',   bg:'#0d0d0d', surface:'#111111', bar:'#0a0a0a', gutter:'#080808', text:'#00ff41', muted:'#00a02a', accent:'#00ff41', border:'#003a10', ln:'#006622' },
   { name:'Oceano',     bg:'#0a1628', surface:'#0e1e38', bar:'#0b1930', gutter:'#081220', text:'#cce4ff', muted:'#5588bb', accent:'#38bdf8', border:'#1a2e48', ln:'#2a4a6a' },
   { name:'Róseo',      bg:'#2b1a1a', surface:'#3a2020', bar:'#4a2828', gutter:'#221414', text:'#f5d5d5', muted:'#aa6868', accent:'#ff6b6b', border:'#5a3030', ln:'#7a4040' },
 ];
 
-let currentThemeIdx = 0;
-
 function buildThemeGrid() {
-  const grid = document.getElementById('themeGrid');
+  const grid = $('themeGrid');
   THEMES.forEach((t, i) => {
-    const el = document.createElement('div');
-    el.className = 'tchip' + (i === 0 ? ' on' : '');
+    const el = document.createElement('button');
+    el.className = 'tchip';
     el.style.cssText = `background:${t.bg};color:${t.text}`;
     el.textContent = t.name;
-    el.onclick = () => applyTheme(i);
+    el.addEventListener('click', () => applyTheme(i));
     grid.appendChild(el);
   });
 }
 
-function applyTheme(i) {
-  const t = THEMES[i];
-  currentThemeIdx = i;
-  setVar('--bg', t.bg); setVar('--surface', t.surface);
-  setVar('--bar', t.bar); setVar('--gutter', t.gutter);
-  setVar('--text', t.text); setVar('--muted', t.muted);
+function applyTheme(i, keepColors) {
+  const t = THEMES[i] || THEMES[0];
+  setVar('--bg', t.bg);         setVar('--surface', t.surface);
+  setVar('--bar', t.bar);       setVar('--gutter', t.gutter);
+  setVar('--text', t.text);     setVar('--muted', t.muted);
   setVar('--accent', t.accent); setVar('--border', t.border);
   setVar('--ln-text', t.ln);
-  document.getElementById('cBg').value = t.bg;
-  document.getElementById('cText').value = t.text;
-  document.getElementById('cAccent').value = t.accent;
-  document.querySelectorAll('.tchip').forEach((c, j) => c.classList.toggle('on', j === i));
+  settings.theme = THEMES.indexOf(t);
+  if (!keepColors) settings.colors = null;
+  saveJSON(SETTINGS_KEY, settings);
+  Object.entries(settings.colors || {}).forEach(([v, val]) => setVar(v, val));
+
+  const current = name => getComputedStyle(root).getPropertyValue(name).trim();
+  $('cBg').value     = current('--bg');
+  $('cText').value   = current('--text');
+  $('cAccent').value = current('--accent');
+  document.querySelectorAll('.tchip').forEach((c, j) => c.classList.toggle('on', j === settings.theme));
+  updateMinimap();
+}
+
+function setCustomColor(v, val) {
+  setVar(v, val);
+  saveSetting('colors', Object.assign({}, settings.colors, { [v]: val }));
+  updateMinimap();
 }
 
 // ══════════════════════════════════════════════════
@@ -916,7 +1331,7 @@ function applyTheme(i) {
 // ══════════════════════════════════════════════════
 let notifTimer;
 function notify(msg) {
-  const el = document.getElementById('notif');
+  const el = $('notif');
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(notifTimer);
@@ -924,50 +1339,27 @@ function notify(msg) {
 }
 
 // ══════════════════════════════════════════════════
-// UTILS
-// ══════════════════════════════════════════════════
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
-// ══════════════════════════════════════════════════
-// EDITOR EVENT LISTENERS
-// ══════════════════════════════════════════════════
-editor.addEventListener('input',   onEditorInput);
-editor.addEventListener('keyup',   updateCursor);
-editor.addEventListener('mouseup', updateCursor);
-editor.addEventListener('click',   updateCursor);
-
-editor.addEventListener('keydown', e => {
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    document.execCommand('insertText', false, '    ');
-  }
-  // Enter: insert <br> instead of <div> in some browsers
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    document.execCommand('insertLineBreak');
-  }
-});
-
-// ══════════════════════════════════════════════════
 // KEYBOARD SHORTCUTS
 // ══════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
   const ctrl = e.ctrlKey || e.metaKey;
-  if (e.key === 'F11') { e.preventDefault(); toggleFocus(); }
-  if (ctrl && e.key === 'f') { e.preventDefault(); toggleFind(); }
-  if (ctrl && e.key === 's') { e.preventDefault(); e.shiftKey ? saveAs() : saveFile(); }
-  if (ctrl && e.key === 'n') { e.preventDefault(); newTab(); }
-  if (ctrl && e.key === 'o') { e.preventDefault(); openFile(); }
-  if (ctrl && e.key === 't') { e.preventDefault(); newTab(); }
-  if (ctrl && e.key === 'w') { e.preventDefault(); if (activeTab) closeTab(activeTab.id); }
-  if (ctrl && e.shiftKey && e.key === 'P') { e.preventDefault(); togglePreview(); }
-  if (ctrl && e.key === ',') { e.preventDefault(); toggleSettings(); }
-  if (ctrl && e.key === 'Tab') {
+  const k = (e.key || '').toLowerCase();
+  if (e.key === 'F11') { e.preventDefault(); toggleFocus(); return; }
+  if (e.key === 'Escape' && $('settings').classList.contains('open')) { toggleSettings(false); return; }
+  if (e.altKey && !ctrl && k === 'z') { e.preventDefault(); $('wrapTgl').click(); return; }
+  if (!ctrl) return;
+
+  if (k === 'f')                 { e.preventDefault(); toggleFind(true); }
+  else if (k === 'h')            { e.preventDefault(); toggleFind(true, true); }
+  else if (k === 's')            { e.preventDefault(); e.shiftKey ? saveAs() : saveFile(); }
+  else if (k === 'o')            { e.preventDefault(); openFile(); }
+  else if (k === 'n' || k === 't') { e.preventDefault(); newTab(); }
+  else if (k === 'w')            { e.preventDefault(); if (activeTab) closeTab(activeTab.id); }
+  else if (k === 'p' && e.shiftKey) { e.preventDefault(); togglePreview(); }
+  else if (k === ',')            { e.preventDefault(); toggleSettings(); }
+  else if (k === 'tab') {
     e.preventDefault();
-    const idx = tabs.findIndex(t => t.id === activeTab?.id);
+    const idx  = tabs.indexOf(activeTab);
     const next = tabs[(idx + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length];
     if (next) switchTab(next.id);
   }
@@ -976,10 +1368,77 @@ document.addEventListener('keydown', e => {
 // ══════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════
+function applySettings() {
+  applyTheme(settings.theme, true);
+  $('fontSel').value = settings.font;
+  if ($('fontSel').value !== settings.font) settings.font = DEFAULT_SETTINGS.font;
+  setVar('--font', settings.font);
+  applyFontSize(settings.fs);
+  applyLineHeight(settings.lh * 100);
+
+  $('wrapTgl').checked = settings.wrap;
+  document.body.classList.toggle('wrap-on', settings.wrap);
+  $('spellTgl').checked = settings.spell;
+  editor.spellcheck = settings.spell;
+  $('lnTgl').checked = settings.lineNumbers;
+  document.body.classList.toggle('no-line-numbers', !settings.lineNumbers);
+  $('chipTgl').checked = linkChipsOn = settings.chips;
+  $('sessionTgl').checked = settings.session;
+  togglePreview(settings.minimap);
+}
+
 buildThemeGrid();
-applyTheme(0);
-newTab();
-editor.focus();
-updateGutter();
-updateMinimap();
+applySettings();
+if (!restoreSession()) newTab();
+const handlesReady = restoreHandles();
 window.addEventListener('resize', updateMinimap);
+
+// ══════════════════════════════════════════════════
+// APP INSTALADO (PWA)
+// ══════════════════════════════════════════════════
+// arquivos abertos pelo Windows ("Abrir com" / duplo clique) chegam pela launchQueue
+if ('launchQueue' in window) {
+  window.launchQueue.setConsumer(async params => {
+    await handlesReady;
+    for (const h of params.files || []) {
+      if (h.kind === 'file') await openFromFile(await h.getFile(), h);
+    }
+  });
+}
+
+if ('serviceWorker' in navigator && !TEST_MODE && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installPrompt = e;
+  $('installBtn').hidden = false;
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  $('installBtn').hidden = true;
+  notify('Bloco instalado! Agora defina-o como app padrão para .txt no Windows.');
+});
+
+async function installApp() {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  $('installBtn').hidden = true;
+}
+
+// ponto de acesso para os testes (tests/) e depuração no console
+window.BlocoApp = {
+  get tabs() { return tabs; },
+  get activeTab() { return activeTab; },
+  get text() { return currentText; },
+  get caret() { return caret; },
+  get findMatches() { return findMatches; },
+  get findIdx() { return findIdx; },
+  get recentFiles() { return recentFiles; },
+  settings, serializeEditor, getSelectionOffsets, setSelectionOffsets, setEditorText,
+  persistSession, renderPendingChips, keys: { RECENT_KEY, SESSION_KEY, SETTINGS_KEY },
+};
