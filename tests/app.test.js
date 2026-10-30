@@ -166,6 +166,45 @@ describe('app: digitação e barra de status', () => {
     expect(lines[2].classList.contains('current')).toBe(true);
   });
 
+  it('a opção "Números de linha" esconde e mostra o gutter', () => {
+    A.$('lnTgl').checked = false;
+    A.w.toggleLineNumbers();
+    expect(A.w.getComputedStyle(A.$('gutter')).display).toBe('none');
+    A.$('lnTgl').checked = true;
+    A.w.toggleLineNumbers();
+    expect(A.w.getComputedStyle(A.$('gutter')).display).not.toBe('none');
+  });
+
+  it('com quebra automática os números continuam visíveis e alinhados às linhas quebradas', () => {
+    A.$('wrapTgl').checked = true;
+    A.w.toggleWrap();
+    A.setText('curta\n' + 'palavra '.repeat(80) + '\n\nfim');
+    A.w.measureWrappedLines();
+    const nums = [...A.$('gutter').querySelectorAll('.gutter-line')];
+    expect(A.w.getComputedStyle(A.$('gutter')).display).not.toBe('none');
+    expect(nums.length).toBe(4);
+    const h = nums.map(n => n.getBoundingClientRect().height);
+    expect(h[1]).toBeGreaterThan(h[0] * 2);         // linha longa ocupa várias linhas visuais
+    expect(Math.round(h[2])).toBe(Math.round(h[0])); // linha vazia tem a altura de uma linha
+    // o número 4 fica na mesma altura do texto "fim"
+    const r = A.d.createRange();
+    const last = [...A.editor.childNodes].reverse().find(n => n.nodeType === 3 && n.data.includes('fim'));
+    r.selectNodeContents(last);
+    expect(Math.abs(r.getBoundingClientRect().top - nums[3].getBoundingClientRect().top) < 4).toBe(true);
+    // desligar a quebra volta à altura normal
+    A.$('wrapTgl').checked = false;
+    A.w.toggleWrap();
+    expect(nums[1].style.height).toBe('');
+  });
+
+  it('a cor da barra da janela (theme-color) acompanha o tema', () => {
+    const meta = () => A.d.querySelector('meta[name="theme-color"]').content;
+    A.w.applyTheme(4);
+    expect(meta()).toBe('#ddd6c8');
+    A.w.applyTheme(6);
+    expect(meta()).toBe('#0a0a0a');
+  });
+
   it('minimap desenha sem erros (antes usava editor.value e quebrava)', () => {
     A.setText('# título\n// comentário\ntexto');
     expect(() => A.w.drawMinimap()).not.toThrow();

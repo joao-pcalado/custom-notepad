@@ -556,7 +556,44 @@ function updateGutter() {
     gutterCurrent = 0;
   }
   setGutterCurrent(caret.line);
+  scheduleWrapMeasure();
   syncScroll();
+}
+
+// Com quebra automática, uma linha lógica pode ocupar várias linhas na tela.
+// Uma cópia invisível do texto, com a mesma largura e fonte, mede a altura de
+// cada linha, e cada número do gutter recebe essa altura (como no VS Code).
+let wrapRaf = null;
+
+function scheduleWrapMeasure() {
+  if (!settings.wrap || wrapRaf) return;
+  wrapRaf = requestAnimationFrame(() => { wrapRaf = null; measureWrappedLines(); });
+}
+
+function measureWrappedLines() {
+  if (!settings.wrap || !editor.clientWidth) return;
+  const cs = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  mirror.className = 'wrap-mirror';
+  mirror.style.width        = editor.clientWidth + 'px';
+  mirror.style.paddingLeft  = cs.paddingLeft;
+  mirror.style.paddingRight = cs.paddingRight;
+
+  currentText.split('\n').forEach(line => {
+    const row = document.createElement('div');
+    let pos = 0;
+    (linkChipsOn ? U.findUrls(line) : []).forEach(m => {
+      row.append(line.slice(pos, m.index), buildChipNode(m.url));
+      pos = m.index + m.url.length;
+    });
+    row.append(line.slice(pos) || (pos ? '' : '​')); // linha vazia ainda ocupa altura
+    mirror.appendChild(row);
+  });
+
+  editor.parentNode.appendChild(mirror);
+  const rows = mirror.children, nums = gutter.children;
+  for (let i = 0; i < nums.length && i < rows.length; i++) nums[i].style.height = rows[i].offsetHeight + 'px';
+  mirror.remove();
 }
 
 function setGutterCurrent(line) {
@@ -1229,6 +1266,7 @@ function toggleFocus() {
 function applyFont() {
   saveSetting('font', $('fontSel').value);
   setVar('--font', settings.font);
+  scheduleWrapMeasure();
   updateMinimap();
 }
 
@@ -1239,6 +1277,7 @@ function applyFontSize(v) {
   setVar('--fs', v + 'px');
   saveSetting('fs', v);
   updateMinimap();
+  scheduleWrapMeasure();
 }
 
 function applyLineHeight(v) {
@@ -1248,6 +1287,7 @@ function applyLineHeight(v) {
   setVar('--lh', lh);
   saveSetting('lh', lh);
   updateMinimap();
+  scheduleWrapMeasure();
 }
 
 function changeFontSize(d) { applyFontSize(Number($('fsRange').value) + d); }
@@ -1255,6 +1295,8 @@ function changeFontSize(d) { applyFontSize(Number($('fsRange').value) + d); }
 function toggleWrap() {
   saveSetting('wrap', $('wrapTgl').checked);
   document.body.classList.toggle('wrap-on', settings.wrap);
+  if (settings.wrap) scheduleWrapMeasure();
+  else [...gutter.children].forEach(s => { s.style.height = ''; });
   updateMinimap();
 }
 
@@ -1317,7 +1359,14 @@ function applyTheme(i, keepColors) {
   $('cText').value   = current('--text');
   $('cAccent').value = current('--accent');
   document.querySelectorAll('.tchip').forEach((c, j) => c.classList.toggle('on', j === settings.theme));
+  syncWindowColor();
   updateMinimap();
+}
+
+// no app instalado, a barra da janela do Windows usa a cor do theme-color
+function syncWindowColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(root).getPropertyValue('--bar').trim();
 }
 
 function setCustomColor(v, val) {
@@ -1392,6 +1441,8 @@ applySettings();
 if (!restoreSession()) newTab();
 const handlesReady = restoreHandles();
 window.addEventListener('resize', updateMinimap);
+// largura do editor muda com janela, modo foco, minimap e gutter → remede as linhas quebradas
+if (typeof ResizeObserver === 'function') new ResizeObserver(scheduleWrapMeasure).observe(editor);
 
 // ══════════════════════════════════════════════════
 // APP INSTALADO (PWA)

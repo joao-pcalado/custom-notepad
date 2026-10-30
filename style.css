@@ -227,9 +227,15 @@ button:focus-visible, select:focus-visible, input:focus-visible + .sl {
 }
 .gutter-line { display:block; }
 .gutter-line.current { color:var(--text); }
-/* com quebra automática as linhas visuais não batem com as lógicas */
-body.no-line-numbers .gutter,
-body.wrap-on .gutter { display:none; }
+body.no-line-numbers .gutter { display:none; }
+
+/* cópia invisível usada para medir linhas quebradas (quebra automática) */
+.wrap-mirror {
+  position: absolute; top: 0; left: 0;
+  visibility: hidden; pointer-events: none;
+  font-family: var(--font); font-size: var(--fs); line-height: var(--lh);
+  white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4;
+}
 
 /* ── EDITOR WRAP ── */
 #editor-wrap {

@@ -286,7 +286,7 @@ Buscar títulos de URLs arbitrárias é bloqueado pelo CORS. O app usa o proxy p
 
 - [ ] Syntax highlighting de Markdown no editor
 - [x] Persistência de sessão via `localStorage`
-- [ ] Números de linha alinhados com linhas quebradas (hoje ficam ocultos com a quebra automática ligada)
+- [x] Números de linha alinhados com linhas quebradas
 - [ ] Visualização em painel dividido (dois editores lado a lado)
 - [ ] Exportação e importação de temas personalizados em JSON
 - [ ] Pipeline de build com Tauri e auto-updater

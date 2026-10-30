@@ -286,7 +286,7 @@ Fetching page titles from arbitrary URLs is blocked by CORS. The app uses the pu
 
 - [ ] Markdown syntax highlighting in the editor
 - [x] Session persistence via `localStorage`
-- [ ] Line numbers aligned with wrapped lines (currently hidden while word wrap is on)
+- [x] Line numbers aligned with wrapped lines
 - [ ] Split-pane view (two editors side by side)
 - [ ] Custom themes export/import as JSON
 - [ ] Tauri build pipeline with auto-updater
